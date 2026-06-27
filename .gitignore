@@ -12,13 +12,19 @@
 
 # testing
 /coverage
+/playwright-report/
+/blob-report/
 
 # next.js
 /.next/
 /out/
+/.turbo/
 
 # production
 /build
+
+# convex local deployment state
+/.convex/
 
 # repo hygiene
 .playwright-cli/

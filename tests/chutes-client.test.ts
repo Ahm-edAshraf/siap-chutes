@@ -37,10 +37,12 @@ describe("Chutes reliability", () => {
           {
             id: "deepseek-ai/DeepSeek-V3.2-TEE",
             confidential_compute: true,
+            supported_features: ["json_mode", "structured_outputs"],
           },
           {
             id: "Qwen/Qwen3.6-27B-TEE",
             confidential_compute: true,
+            supported_features: ["json_mode", "structured_outputs"],
           },
         ],
       }),
@@ -50,6 +52,32 @@ describe("Chutes reliability", () => {
         "deepseek-ai/DeepSeek-V3.2-TEE",
         async () => "token",
         ["deepseek-ai/DeepSeek-V3.2-TEE"],
+        { fetchImpl },
+      ),
+    ).resolves.toBe("Qwen/Qwen3.6-27B-TEE");
+  });
+
+  test("skips a TEE model without structured-output support", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse({
+        data: [
+          {
+            id: "unsloth/Mistral-Nemo-Instruct-2407-TEE",
+            confidential_compute: true,
+          },
+          {
+            id: "Qwen/Qwen3.6-27B-TEE",
+            confidential_compute: true,
+            supported_features: ["json_mode", "structured_outputs"],
+          },
+        ],
+      }),
+    );
+    await expect(
+      selectTeeModel(
+        "unsloth/Mistral-Nemo-Instruct-2407-TEE",
+        async () => "token",
+        [],
         { fetchImpl },
       ),
     ).resolves.toBe("Qwen/Qwen3.6-27B-TEE");
@@ -66,6 +94,7 @@ describe("Chutes reliability", () => {
             {
               id: "google/gemma-4-31B-turbo-TEE",
               confidential_compute: true,
+              supported_features: ["json_mode", "structured_outputs"],
             },
           ],
         }),
@@ -111,6 +140,18 @@ describe("Chutes reliability", () => {
       usage: { inputTokens: 10, outputTokens: 2 },
     });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const request = fetchImpl.mock.calls[0][1] as RequestInit;
+    const body = JSON.parse(String(request.body)) as {
+      response_format: {
+        type: string;
+        json_schema: { strict: boolean; schema: unknown };
+      };
+    };
+    expect(body.response_format).toMatchObject({
+      type: "json_schema",
+      json_schema: { strict: true },
+    });
+    expect(body.response_format.json_schema.schema).toBeTruthy();
   });
 
   test("retries network and 5xx failures only twice", async () => {
@@ -124,6 +165,7 @@ describe("Chutes reliability", () => {
             {
               id: "google/gemma-4-31B-turbo-TEE",
               confidential_compute: true,
+              supported_features: ["json_mode", "structured_outputs"],
             },
           ],
         }),
@@ -146,8 +188,19 @@ describe("Chutes reliability", () => {
         fetchImpl,
         sleep: async () => undefined,
       }),
-    ).rejects.toMatchObject({ name: "TimeoutError" });
+    ).rejects.toThrow("CHUTES_STAGE_TIMEOUT");
     expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  test("does not start a request after the stage deadline", async () => {
+    const fetchImpl = vi.fn();
+    await expect(
+      selectTeeModel("google/gemma-4-31B-turbo-TEE", async () => "token", [], {
+        fetchImpl,
+        deadlineAt: Date.now() - 1,
+      }),
+    ).rejects.toThrow("CHUTES_STAGE_TIMEOUT");
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   test("fails after the single malformed-output repair", async () => {

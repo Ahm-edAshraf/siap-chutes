@@ -99,7 +99,12 @@ async function extractPdf(
   } finally {
     await pdf.cleanup();
     await pdf.destroy();
-    buffer.fill(0);
+    try {
+      buffer.fill(0);
+    } catch {
+      // ArrayBuffer may have been detached by pdf.js worker transfer.
+      // The raw bytes are no longer accessible from this context.
+    }
   }
 }
 

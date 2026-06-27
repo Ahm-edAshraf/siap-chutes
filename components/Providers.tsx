@@ -16,7 +16,7 @@ if (!convexUrl) throw new Error("Missing NEXT_PUBLIC_CONVEX_URL");
 const convex = new ConvexReactClient(convexUrl);
 
 function SyncUser({ children }: { children: ReactNode }) {
-  const { isAuthenticated } = useConvexAuth();
+  const { isLoading, isAuthenticated } = useConvexAuth();
   const sync = useMutation(api.users.sync);
   const [synced, setSynced] = useState(false);
   const [syncError, setSyncError] = useState(false);
@@ -34,7 +34,7 @@ function SyncUser({ children }: { children: ReactNode }) {
       </div>
     );
   }
-  if (isAuthenticated && !synced) {
+  if (isLoading || (isAuthenticated && !synced)) {
     return (
       <div className="min-h-screen grid place-items-center text-sm text-siap-ink/60">
         Connecting your encrypted workspace...

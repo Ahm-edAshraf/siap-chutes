@@ -81,8 +81,13 @@ export default function AnalysingPage() {
     }
     if (!documents || !progress || progress.application.state === "failed")
       return;
-    const next = progress.stages.find((stage) => stage.status === "pending");
-    if (!next || requested.current.has(next.stage)) return;
+    const next = progress.stages.find((stage) => stage.status !== "complete");
+    if (
+      !next ||
+      next.status !== "pending" ||
+      requested.current.has(next.stage)
+    )
+      return;
     requested.current.add(next.stage);
     void fetch(`/api/analyses/${id}/stages/${next.stage}`, {
       method: "POST",

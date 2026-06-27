@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { cookies } from "next/headers";
 import {
   ArrowRight,
   CheckCircle2,
@@ -6,6 +7,7 @@ import {
   Shield,
   Upload,
 } from "lucide-react";
+import { AUTH_COOKIES } from "@/lib/auth/cookies";
 
 const steps = [
   {
@@ -31,6 +33,13 @@ export default async function LandingPage({
   searchParams: Promise<{ auth_error?: string | string[] }>;
 }) {
   const authError = (await searchParams).auth_error;
+  const store = await cookies();
+  const isSignedIn = Boolean(
+    store.get(AUTH_COOKIES.access)?.value ||
+      store.get(AUTH_COOKIES.refresh)?.value,
+  );
+  const primaryHref = isSignedIn ? "/app" : "/api/auth/chutes/login?returnTo=/app/new";
+  const primaryLabel = isSignedIn ? "Go to your workspace" : "Sign in with Chutes";
   return (
     <div className="min-h-screen flex flex-col text-siap-ink">
       <header className="py-6 px-6 md:px-12 flex justify-between items-center border-b border-siap-ink">
@@ -44,12 +53,21 @@ export default async function LandingPage({
           >
             Privacy
           </Link>
-          <Link
-            href="/api/auth/chutes/login?returnTo=/app"
-            className="bg-siap-ink text-white px-5 py-2.5 rounded"
-          >
-            Sign in with Chutes
-          </Link>
+          {isSignedIn ? (
+            <Link
+              href="/app"
+              className="bg-siap-ink text-white px-5 py-2.5 rounded"
+            >
+              Your workspace
+            </Link>
+          ) : (
+            <Link
+              href="/api/auth/chutes/login?returnTo=/app"
+              className="bg-siap-ink text-white px-5 py-2.5 rounded"
+            >
+              Sign in with Chutes
+            </Link>
+          )}
         </nav>
       </header>
       <main className="flex-1">
@@ -77,10 +95,10 @@ export default async function LandingPage({
             </p>
             <div className="flex flex-col sm:flex-row gap-3 mt-8">
               <Link
-                href="/api/auth/chutes/login?returnTo=/app/new"
+                href={primaryHref}
                 className="inline-flex justify-center items-center gap-2 bg-siap-ink text-white px-6 py-3.5 rounded text-lg font-medium"
               >
-                Sign in with Chutes <ArrowRight className="w-5 h-5" />
+                {primaryLabel} <ArrowRight className="w-5 h-5" />
               </Link>
               <Link
                 href="/sample/Siap%20Demo%20Scholarship%20Pack%202026.pdf"

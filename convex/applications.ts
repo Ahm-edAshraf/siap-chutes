@@ -7,7 +7,11 @@ import {
   reportBundle,
   stageDoc,
 } from "./documentValidators";
-import { requireOwnedApplication, requireUser } from "./lib/auth";
+import {
+  getOptionalUser,
+  requireOwnedApplication,
+  requireUser,
+} from "./lib/auth";
 import { deleteApplicationChildren } from "./lib/deletion";
 
 const STAGES = [
@@ -73,7 +77,8 @@ export const list = query({
   args: {},
   returns: v.array(applicationDoc),
   handler: async (ctx) => {
-    const user = await requireUser(ctx);
+    const user = await getOptionalUser(ctx);
+    if (!user) return [];
     return await ctx.db
       .query("applications")
       .withIndex("by_user_updated", (q) => q.eq("userId", user._id))

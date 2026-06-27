@@ -68,10 +68,11 @@ Outcomes:
 
 The stage endpoint is authenticated, origin-checked, sequential, and
 idempotent. It retries transient Chutes failures twice, refreshes once after a
-401, permits one schema-repair request, verifies citations against normalized
-page text, and persists only validated structured output. Generation and
-attempt fencing prevents a late request from writing into a restarted
-analysis.
+401, permits one schema-repair request, and gives slow TEE inference a bounded
+270-second stage budget. Timeouts are persisted as `CHUTES_STAGE_TIMEOUT`.
+The route verifies citations against normalized page text and persists only
+validated structured output. Generation and attempt fencing prevents a late
+request from writing into a restarted analysis.
 
 Default TEE models:
 
@@ -81,8 +82,9 @@ Default TEE models:
   `MiniMaxAI/MiniMax-M2.5-TEE`
 
 The live model catalogue is authoritative. A configured model is used only
-when its current `confidential_compute` value is `true`; otherwise selection
-falls through the allowlist or fails closed.
+when its current `confidential_compute` value is `true` and it advertises
+`structured_outputs`; otherwise selection falls through the allowlist or
+fails closed. Stage requests use strict JSON Schema response formatting.
 
 ## Document limits
 

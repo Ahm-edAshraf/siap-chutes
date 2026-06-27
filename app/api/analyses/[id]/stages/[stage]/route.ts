@@ -49,6 +49,7 @@ function errorCode(error: unknown) {
     "NO_APPROVED_TEE_MODEL",
     "MALFORMED_MODEL_OUTPUT",
     "INCOMPLETE_REQUIREMENT_COVERAGE",
+    "CHUTES_STAGE_TIMEOUT",
   ];
   if (allowed.includes(message)) return message;
   if (message.startsWith("CHUTES_MODEL_CATALOG_")) return message;
@@ -169,7 +170,9 @@ async function applyStageOutput(
 
 export async function POST(
   request: Request,
-  context: RouteContext<"/api/analyses/[id]/stages/[stage]">,
+  context: {
+    params: Promise<{ id: string; stage: string }>;
+  },
 ) {
   if (!hasValidOrigin(request)) {
     return NextResponse.json({ error: "Invalid origin" }, { status: 403 });
@@ -235,6 +238,7 @@ export async function POST(
     };
     const primaryModel =
       process.env.CHUTES_PRIMARY_MODEL ?? "google/gemma-4-31B-turbo-TEE";
+    const chutesOptions = { deadlineAt: Date.now() + 270_000 };
     const requestedModel =
       stage === "red_team_reviewer"
         ? (process.env.CHUTES_REVIEW_MODEL ?? "deepseek-ai/DeepSeek-V3.2-TEE")
@@ -252,6 +256,7 @@ export async function POST(
       requestedModel,
       getAccessToken,
       stage === "red_team_reviewer" ? previousModels : [],
+      chutesOptions,
     );
     const prompt = buildPrompt(stage, requestData.documents, {
       application: analysisContext.application,
@@ -270,6 +275,7 @@ export async function POST(
       outputSchemas[stage] as ZodType<StageOutput>,
       OUTPUT_FORMATS[stage],
       getAccessToken,
+      chutesOptions,
     );
     await refreshConvexAuth();
     await applyStageOutput(

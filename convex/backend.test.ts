@@ -406,6 +406,8 @@ describe("Convex analysis lifecycle", () => {
       inventory: 0,
       stages: 0,
     });
+    await expect(user.query(api.profiles.get)).resolves.toBeNull();
+    await expect(user.query(api.applications.list)).resolves.toEqual([]);
   });
 
   test("completes all four stages with server-computed readiness and metadata", async () => {

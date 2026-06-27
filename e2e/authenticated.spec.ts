@@ -5,6 +5,7 @@ const enabled =
   Boolean(process.env.E2E_AUTH_STATE);
 
 test.describe("paid authenticated flow", () => {
+  test.setTimeout(15 * 60_000);
   test.skip(!enabled, "Requires RUN_CHUTES_SMOKE_TEST and E2E_AUTH_STATE");
   test.use({
     storageState: process.env.E2E_AUTH_STATE,
@@ -18,6 +19,20 @@ test.describe("paid authenticated flow", () => {
       if (message.type() === "error") runtimeErrors.push(message.text());
     });
     page.on("pageerror", (error) => runtimeErrors.push(error.message));
+
+    const initialSession = await page.request.get("/api/auth/chutes/session");
+    const initialSessionBody = (await initialSession.json()) as {
+      isSignedIn?: boolean;
+    };
+    expect(
+      initialSessionBody,
+      "E2E_AUTH_STATE is expired or revoked; capture a fresh authenticated state",
+    ).toMatchObject({
+      isSignedIn: true,
+    });
+    if (process.env.E2E_AUTH_STATE) {
+      await page.context().storageState({ path: process.env.E2E_AUTH_STATE });
+    }
 
     await page.goto("/app/new");
     await page
@@ -66,7 +81,22 @@ test.describe("paid authenticated flow", () => {
     await expect(
       page.getByRole("heading", { name: "Analysing application" }),
     ).toBeVisible();
-    await expect(page).toHaveURL(/\/app\/reports\//, { timeout: 5 * 60_000 });
+    await expect(
+      page.getByRole("heading", { name: "Analysis failed safely" }),
+    ).toBeHidden();
+    const finalOutcome = await Promise.race([
+      page
+        .waitForURL(/\/app\/reports\//, { timeout: 8 * 60_000 })
+        .then(() => "report" as const),
+      page
+        .getByRole("heading", { name: "Analysis failed safely" })
+        .waitFor({ state: "visible", timeout: 8 * 60_000 })
+        .then(() => "failed" as const),
+    ]);
+    expect(
+      finalOutcome,
+      "The retried live analysis reached a terminal failure",
+    ).toBe("report");
     const reportUrl = page.url();
     await expect(
       page.getByRole("heading", { name: "Eligibility checks" }),
@@ -132,7 +162,7 @@ test.describe("paid authenticated flow", () => {
 
     await page.goto(reportUrl);
     page.once("dialog", (dialog) => void dialog.accept());
-    await page.getByRole("button", { name: "Delete" }).click();
+    await page.getByRole("button", { name: "Delete", exact: true }).click();
     await expect(page).toHaveURL(/\/app\/reports$/);
     await page.goto(reportUrl);
     await expect(
@@ -148,6 +178,16 @@ test.describe("paid authenticated flow", () => {
       isSignedIn: false,
       user: null,
     });
-    expect(runtimeErrors).toEqual([]);
+    const expectedInjectedErrors = runtimeErrors.filter(
+      (message) =>
+        message.includes("Failed to load resource") &&
+        message.includes("502 (Bad Gateway)"),
+    );
+    expect(expectedInjectedErrors).toHaveLength(1);
+    expect(
+      runtimeErrors.filter(
+        (message) => !expectedInjectedErrors.includes(message),
+      ),
+    ).toEqual([]);
   });
 });

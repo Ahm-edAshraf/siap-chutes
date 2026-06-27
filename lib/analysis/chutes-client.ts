@@ -44,12 +44,25 @@ export type AccessTokenProvider = (
 export interface ChutesRequestOptions {
   fetchImpl?: typeof fetch;
   sleep?: (milliseconds: number) => Promise<void>;
+  deadlineAt?: number;
+}
+
+function stageTimeout() {
+  return new Error("CHUTES_STAGE_TIMEOUT");
+}
+
+function isTimeoutError(error: unknown) {
+  return (
+    error instanceof DOMException &&
+    (error.name === "TimeoutError" || error.name === "AbortError")
+  );
 }
 
 async function requestWithRetry(
   url: string,
   init: RequestInit,
   getAccessToken: AccessTokenProvider,
+  perAttemptTimeoutMs: number,
   options: ChutesRequestOptions = {},
 ) {
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -62,6 +75,12 @@ async function requestWithRetry(
   let token = await getAccessToken(false);
   if (!token) throw new Error("CHUTES_AUTH_REQUIRED");
   while (true) {
+    const remainingMs =
+      options.deadlineAt === undefined
+        ? perAttemptTimeoutMs
+        : options.deadlineAt - Date.now();
+    if (remainingMs <= 0) throw stageTimeout();
+    const timeoutMs = Math.max(1, Math.min(perAttemptTimeoutMs, remainingMs));
     let response: Response;
     try {
       response = await fetchImpl(url, {
@@ -71,12 +90,24 @@ async function requestWithRetry(
           authorization: `Bearer ${token}`,
         },
         cache: "no-store",
-        signal: AbortSignal.timeout(60_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
-      if (transientAttempts >= 2) throw error;
+      if (
+        transientAttempts >= 2 ||
+        (options.deadlineAt !== undefined && options.deadlineAt <= Date.now())
+      ) {
+        if (isTimeoutError(error)) throw stageTimeout();
+        throw error;
+      }
       transientAttempts += 1;
-      await sleep(250 * 2 ** (transientAttempts - 1));
+      const backoff = 250 * 2 ** (transientAttempts - 1);
+      const remainingAfterError =
+        options.deadlineAt === undefined
+          ? backoff
+          : options.deadlineAt - Date.now();
+      if (remainingAfterError <= 0) throw stageTimeout();
+      await sleep(Math.min(backoff, remainingAfterError));
       continue;
     }
     if (response.status === 401 && !refreshed) {
@@ -107,6 +138,7 @@ export async function selectTeeModel(
     MODEL_ENDPOINT,
     { method: "GET" },
     getAccessToken,
+    30_000,
     options,
   );
   if (!response.ok) {
@@ -115,7 +147,11 @@ export async function selectTeeModel(
   const catalog = modelCatalogSchema.parse(await response.json());
   const approved = new Map(
     catalog.data
-      .filter((model) => model.confidential_compute)
+      .filter(
+        (model) =>
+          model.confidential_compute &&
+          model.supported_features?.includes("structured_outputs"),
+      )
       .map((model) => [model.id, model]),
   );
   const candidates = [requestedModel, ...FALLBACK_MODELS];
@@ -126,12 +162,15 @@ export async function selectTeeModel(
   return selected;
 }
 
-async function createCompletion(
+async function createCompletion<T>(
   model: string,
   prompt: string,
+  schema: ZodType<T>,
   getAccessToken: AccessTokenProvider,
   options: ChutesRequestOptions,
 ) {
+  const jsonSchema = z.toJSONSchema(schema);
+  delete jsonSchema.$schema;
   const response = await requestWithRetry(
     COMPLETIONS_ENDPOINT,
     {
@@ -147,12 +186,20 @@ async function createCompletion(
           },
           { role: "user", content: prompt },
         ],
-        response_format: { type: "json_object" },
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "siap_stage_output",
+            strict: true,
+            schema: jsonSchema,
+          },
+        },
         temperature: 0.1,
         max_tokens: 8_000,
       }),
     },
     getAccessToken,
+    240_000,
     options,
   );
   if (!response.ok) {
@@ -179,6 +226,7 @@ export async function runStructuredStage<T>(
   let completion = await createCompletion(
     model,
     prompt,
+    schema,
     getAccessToken,
     options,
   );
@@ -188,6 +236,7 @@ export async function runStructuredStage<T>(
     completion = await createCompletion(
       model,
       buildRepairPrompt(prompt, firstContent, schemaDescription),
+      schema,
       getAccessToken,
       options,
     );

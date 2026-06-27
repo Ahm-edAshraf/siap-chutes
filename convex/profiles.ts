@@ -1,6 +1,6 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
-import { requireUser } from "./lib/auth";
+import { getOptionalUser, requireUser } from "./lib/auth";
 import { deleteApplicationChildren } from "./lib/deletion";
 import { profileFields } from "./validators";
 
@@ -35,7 +35,8 @@ export const get = query({
   args: {},
   returns: v.union(v.null(), profileDoc),
   handler: async (ctx) => {
-    const user = await requireUser(ctx);
+    const user = await getOptionalUser(ctx);
+    if (!user) return null;
     return await ctx.db
       .query("profiles")
       .withIndex("by_user", (q) => q.eq("userId", user._id))
