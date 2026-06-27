@@ -1,26 +1,93 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f3f0e8; /* off-white paper */
+  --foreground: #17211d; /* deep ink */
+
+  --color-ink: #17211d;
+  --color-paper: #f3f0e8;
+  --color-red: #d94a3a;
+  --color-green: #167a5a;
+  --color-amber: #d89527;
+  --color-teal: #377d78;
+  --color-charcoal: #333333;
+  --color-gray: #d4d0c5;
+}
+
+@utility sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+  color: color-mix(in srgb, var(--color-siap-ink) 65%, transparent);
+  transition: color 150ms ease;
+}
+
+@utility mobile-menu-link {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 1rem;
+  font-weight: 500;
+}
+
+@utility report-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--color-ink);
+  border-radius: 0.25rem;
+  background: white;
+  font-size: 0.875rem;
+  font-weight: 500;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+  --font-sans: var(--font-ibm-plex), Arial, Helvetica, sans-serif;
+  --font-serif: var(--font-newsreader), ui-serif, Georgia, serif;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-siap-ink: var(--color-ink);
+  --color-siap-paper: var(--color-paper);
+  --color-siap-red: var(--color-red);
+  --color-siap-green: var(--color-green);
+  --color-siap-amber: var(--color-amber);
+  --color-siap-teal: var(--color-teal);
+  --color-siap-gray: var(--color-gray);
+  --color-siap-charcoal: var(--color-charcoal);
 }
 
 body {
-  background: var(--background);
+  background-color: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Document-like border styles and utilities */
+@utility rule-bottom {
+  border-bottom: 1px solid var(--color-ink);
+}
+@utility rule-top {
+  border-top: 1px solid var(--color-ink);
+}
+@utility rule-y {
+  border-top: 1px solid var(--color-ink);
+  border-bottom: 1px solid var(--color-ink);
+}
+@utility rule-x {
+  border-left: 1px solid var(--color-ink);
+  border-right: 1px solid var(--color-ink);
+}
+@utility box-border {
+  border: 1px solid var(--color-ink);
+}
+
+/* Subtle paper grain */
+@utility paper-grain {
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.05'/%3E%3C/svg%3E");
 }

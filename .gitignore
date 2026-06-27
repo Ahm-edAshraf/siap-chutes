@@ -20,6 +20,21 @@
 # production
 /build
 
+# repo hygiene
+.playwright-cli/
+.playwright-mcp/
+playwright/.auth/
+test-results/
+tmp/
+output/playwright/
+output/pdf/
+
+# debug / local scratch
+*.log
+debug-e2e.mjs
+e2e-auth-state.json
+/*.pdf
+
 # misc
 .DS_Store
 *.pem
@@ -32,6 +47,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
