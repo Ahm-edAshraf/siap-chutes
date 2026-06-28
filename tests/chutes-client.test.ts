@@ -41,7 +41,7 @@ describe("Chutes reliability", () => {
             supported_features: ["json_mode", "structured_outputs"],
           },
           {
-            id: "Qwen/Qwen3.6-27B-TEE",
+            id: "zai-org/GLM-5-TEE",
             confidential_compute: true,
             supported_features: ["json_mode", "structured_outputs"],
           },
@@ -55,7 +55,7 @@ describe("Chutes reliability", () => {
         ["deepseek-ai/DeepSeek-V3.2-TEE"],
         { fetchImpl },
       ),
-    ).resolves.toBe("Qwen/Qwen3.6-27B-TEE");
+    ).resolves.toBe("zai-org/GLM-5-TEE");
   });
 
   test("skips a TEE model without structured-output support", async () => {
@@ -67,7 +67,7 @@ describe("Chutes reliability", () => {
             confidential_compute: true,
           },
           {
-            id: "Qwen/Qwen3.6-27B-TEE",
+            id: "zai-org/GLM-5-TEE",
             confidential_compute: true,
             supported_features: ["json_mode", "structured_outputs"],
           },
@@ -81,7 +81,7 @@ describe("Chutes reliability", () => {
         [],
         { fetchImpl },
       ),
-    ).resolves.toBe("Qwen/Qwen3.6-27B-TEE");
+    ).resolves.toBe("zai-org/GLM-5-TEE");
   });
 
   test("selects a distinct structured-output TEE model for every agent", async () => {
@@ -89,7 +89,7 @@ describe("Chutes reliability", () => {
       jsonResponse({
         data: [
           "google/gemma-4-31B-turbo-TEE",
-          "Qwen/Qwen3.6-27B-TEE",
+          "zai-org/GLM-5-TEE",
           "deepseek-ai/DeepSeek-V3.2-TEE",
           "MiniMaxAI/MiniMax-M2.5-TEE",
         ].map((id) => ({
@@ -108,15 +108,15 @@ describe("Chutes reliability", () => {
           },
           {
             key: "mapper",
-            requestedModel: "Qwen/Qwen3.6-27B-TEE",
+            requestedModel: "MiniMaxAI/MiniMax-M2.5-TEE",
           },
           {
             key: "reviewer",
-            requestedModel: "Qwen/Qwen3.6-27B-TEE",
+            requestedModel: "deepseek-ai/DeepSeek-V3.2-TEE",
           },
           {
             key: "planner",
-            requestedModel: "MiniMaxAI/MiniMax-M2.5-TEE",
+            requestedModel: "zai-org/GLM-5-TEE",
           },
         ] as const,
         async () => "token",
@@ -124,9 +124,9 @@ describe("Chutes reliability", () => {
       ),
     ).resolves.toEqual({
       compiler: "google/gemma-4-31B-turbo-TEE",
-      mapper: "Qwen/Qwen3.6-27B-TEE",
+      mapper: "MiniMaxAI/MiniMax-M2.5-TEE",
       reviewer: "deepseek-ai/DeepSeek-V3.2-TEE",
-      planner: "MiniMaxAI/MiniMax-M2.5-TEE",
+      planner: "zai-org/GLM-5-TEE",
     });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });

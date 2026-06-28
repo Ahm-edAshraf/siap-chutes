@@ -33,14 +33,16 @@ One analysis starts four distinct structured-output TEE models concurrently:
 | Agent | Default model | Responsibility |
 | --- | --- | --- |
 | Requirement compiler | `google/gemma-4-31B-turbo-TEE` | Extract rules, deadlines, and citations |
-| Eligibility mapper | `Qwen/Qwen3.6-27B-TEE` | Map applicant evidence to every requirement |
+| Eligibility mapper | `MiniMaxAI/MiniMax-M2.5-TEE` | Extract typed, cited applicant evidence |
 | Independent reviewer | `deepseek-ai/DeepSeek-V3.2-TEE` | Challenge unsupported or optimistic conclusions |
-| Action planner | `MiniMaxAI/MiniMax-M2.5-TEE` | Produce the ordered completion plan |
+| Action planner | `zai-org/GLM-5-TEE` | Challenge the deterministic completion plan |
 
 The live Chutes catalogue is authoritative. Siap fails closed unless every
 selected model advertises confidential compute and structured-output support.
-Validated responses are reconciled deterministically; the reviewer may
-downgrade a conclusion but cannot silently upgrade one.
+Validated responses are reconciled deterministically. Typed numeric and
+categorical facts are evaluated in code; semantic facts require independently
+grounded mapper and reviewer agreement. Programme rules can never serve as
+applicant evidence.
 
 ```text
 Browser PDF/OCR

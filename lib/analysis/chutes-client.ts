@@ -8,7 +8,7 @@ const COMPLETIONS_ENDPOINT = "https://llm.chutes.ai/v1/chat/completions";
 
 const FALLBACK_MODELS = [
   "google/gemma-4-31B-turbo-TEE",
-  "Qwen/Qwen3.6-27B-TEE",
+  "zai-org/GLM-5-TEE",
   "deepseek-ai/DeepSeek-V3.2-TEE",
   "MiniMaxAI/MiniMax-M2.5-TEE",
 ] as const;

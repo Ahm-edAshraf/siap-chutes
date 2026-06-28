@@ -54,6 +54,19 @@ export const modelCitationSchema = z.object({
   confidence: z.enum(["high", "medium", "low"]).default("medium"),
 });
 
+export const evidenceClaimSchema = z.object({
+  field: z.string().regex(/^[a-z0-9_]{1,64}$/),
+  valueType: z.enum(["number", "boolean", "string", "date"]),
+  numberValue: z.number().finite().optional(),
+  booleanValue: z.boolean().optional(),
+  stringValue: z.string().min(1).max(200).optional(),
+  dateValue: z.iso.date().optional(),
+  unit: z.string().min(1).max(50).optional(),
+  subject: z.string().min(1).max(120),
+  qualifiers: z.array(z.string().min(1).max(80)).max(12),
+  verbatimValue: z.string().min(1).max(300),
+});
+
 export const compilerOutputSchema = z.object({
   programme: z.object({
     name: z.string().min(1).max(200),
@@ -100,6 +113,7 @@ export const mapperOutputSchema = z.object({
         ]),
         reason: z.string().min(1).max(500),
         citation: modelCitationSchema,
+        claim: evidenceClaimSchema.optional(),
       }),
     )
     .max(100),
@@ -117,13 +131,18 @@ export const reviewerOutputSchema = z.object({
           "incomplete",
           "not_met",
         ]),
+        evidenceVerdict: z.enum([
+          "supports_mapping",
+          "contradicts_mapping",
+          "unclear",
+        ]),
         reason: z.string().min(1).max(500),
       }),
     )
     .max(100),
 });
 
-export const plannerOutputSchema = z.object({
+export const stablePlanSchema = z.object({
   missingDocuments: z
     .array(
       z.object({
@@ -150,14 +169,23 @@ export const plannerOutputSchema = z.object({
     .max(100),
 });
 
+export const plannerAgentOutputSchema = z.object({
+  recommendation: z.enum(["ready", "actions_required", "likely_ineligible"]),
+  priorityRequirementKeys: z
+    .array(z.string().min(1).max(64))
+    .max(20),
+  rationale: z.string().min(1).max(500),
+});
+
 export const outputSchemas = {
   requirement_compiler: compilerOutputSchema,
   eligibility_mapper: mapperOutputSchema,
   red_team_reviewer: reviewerOutputSchema,
-  action_planner: plannerOutputSchema,
+  action_planner: plannerAgentOutputSchema,
 } as const;
 
 export type CompilerOutput = z.infer<typeof compilerOutputSchema>;
 export type MapperOutput = z.infer<typeof mapperOutputSchema>;
 export type ReviewerOutput = z.infer<typeof reviewerOutputSchema>;
-export type PlannerOutput = z.infer<typeof plannerOutputSchema>;
+export type PlannerOutput = z.infer<typeof stablePlanSchema>;
+export type PlannerAgentOutput = z.infer<typeof plannerAgentOutputSchema>;

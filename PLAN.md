@@ -133,9 +133,9 @@
   Model defaults:
 
   - Requirement compiler: google/gemma-4-31B-turbo-TEE
-  - Eligibility mapper: Qwen/Qwen3.6-27B-TEE
+  - Eligibility mapper: MiniMaxAI/MiniMax-M2.5-TEE
   - Reviewer: deepseek-ai/DeepSeek-V3.2-TEE
-  - Action planner: MiniMaxAI/MiniMax-M2.5-TEE
+  - Action planner: zai-org/GLM-5-TEE
 
   Before inference, query the live model catalogue and require confidential_compute: true. Fail closed if no approved TEE model is available. Persist the actual model, TEE status,
   duration, token usage, prompt version, and outcome—but no content. This follows Chutes’ documented confidential-compute privacy model (https://chutes.ai/privacy).

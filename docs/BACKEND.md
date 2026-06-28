@@ -79,8 +79,8 @@ Default TEE models:
 
 - Primary: `google/gemma-4-31B-turbo-TEE`
 - Independent reviewer: `deepseek-ai/DeepSeek-V3.2-TEE`
-- Eligibility mapper: `Qwen/Qwen3.6-27B-TEE`
-- Action planner: `MiniMaxAI/MiniMax-M2.5-TEE`
+- Eligibility mapper: `MiniMaxAI/MiniMax-M2.5-TEE`
+- Action planner: `zai-org/GLM-5-TEE`
 - Ordered fallbacks use the same four-model allowlist while preserving a
   distinct model for every agent.
 

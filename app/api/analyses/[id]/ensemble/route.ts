@@ -7,13 +7,17 @@ import {
   runStructuredStage,
   selectDistinctTeeModels,
 } from "@/lib/analysis/chutes-client";
-import { verifiedCitation } from "@/lib/analysis/citations";
-import { runConcurrently } from "@/lib/analysis/concurrency";
 import {
-  evaluateCondition,
-  resolveRequirementState,
-} from "@/lib/analysis/deterministic";
+  normalizeEvidence,
+  verifiedCitation,
+} from "@/lib/analysis/citations";
+import { runConcurrently } from "@/lib/analysis/concurrency";
+import { evaluateCondition } from "@/lib/analysis/deterministic";
 import { validateActionDag } from "@/lib/analysis/dag";
+import {
+  isSupportingDocument,
+  resolveEvidenceConsensus,
+} from "@/lib/analysis/evidence-claims";
 import { assertExactRequirementCoverage } from "@/lib/analysis/coverage";
 import { validateExtractedDocuments } from "@/lib/analysis/limits";
 import {
@@ -33,6 +37,7 @@ import {
   stageRequestSchema,
   type CompilerOutput,
   type MapperOutput,
+  type PlannerAgentOutput,
   type PlannerOutput,
   type ReviewerOutput,
   type StageName,
@@ -47,7 +52,7 @@ const MAX_TOKENS: Record<StageName, number> = {
   requirement_compiler: 3_000,
   eligibility_mapper: 6_000,
   red_team_reviewer: 6_000,
-  action_planner: 3_000,
+  action_planner: 1_500,
 };
 
 function required(name: string): string {
@@ -80,6 +85,7 @@ async function applyStageOutput(
   output: CompilerOutput | MapperOutput | ReviewerOutput | PlannerOutput,
   context: Awaited<ReturnType<ConvexHttpClient["query"]>>,
   documents: ReturnType<typeof stageRequestSchema.parse>["documents"],
+  reviews: ReviewerOutput["reviews"] = [],
 ) {
   if (stage === "requirement_compiler") {
     const value = output as CompilerOutput;
@@ -98,11 +104,14 @@ async function applyStageOutput(
   if (stage === "eligibility_mapper") {
     const value = output as MapperOutput;
     const typedContext = context as {
-      profile: Parameters<typeof evaluateCondition>[1];
+      application: { sourceFileName: string };
+      profile: Parameters<typeof evaluateCondition>[1] & { name: string };
       requirements: Array<
         Parameters<typeof evaluateCondition>[0] & {
           _id: string;
           key: string;
+          label: string;
+          description?: string;
           mandatory: boolean;
         }
       >;
@@ -122,6 +131,9 @@ async function applyStageOutput(
         requirement,
       ]),
     );
+    const reviewByKey = new Map(
+      reviews.map((review) => [review.requirementKey, review]),
+    );
     assertExactRequirementCoverage(
       typedContext.requirements.map((requirement) => requirement.key),
       value.mappings.map((mapping) => mapping.requirementKey),
@@ -136,7 +148,7 @@ async function applyStageOutput(
           throw new Error(`Unknown requirement key: ${mapping.requirementKey}`);
         }
         const mapperCitation = verifiedCitation(documents, mapping.citation);
-        const deterministicResult = evaluateCondition(
+        const profileResult = evaluateCondition(
           requirement,
           typedContext.profile,
           availableDocumentNames,
@@ -146,8 +158,36 @@ async function applyStageOutput(
             evidence.requirementId === requirement._id &&
             evidence.citationVerified,
         );
+        const citedDocument = documents.find(
+          (document) =>
+            normalizeEvidence(document.name) ===
+            normalizeEvidence(mapping.citation.documentName),
+        );
+        const citedPageText =
+          mapping.citation.pageNumber === undefined
+            ? citedDocument?.pages.map((page) => page.text).join("\n")
+            : citedDocument?.pages.find(
+                (page) => page.pageNumber === mapping.citation.pageNumber,
+              )?.text;
+        const resolution = resolveEvidenceConsensus({
+          requirement,
+          mapping,
+          review: reviewByKey.get(mapping.requirementKey),
+          profileResult,
+          citationVerified:
+            profileResult === null
+              ? mapperCitation.verified
+              : (compilerCitation?.citationVerified ??
+                mapperCitation.verified),
+          citationIsSupporting: isSupportingDocument(
+            typedContext.application.sourceFileName,
+            mapping.citation.documentName,
+          ),
+          expectedSubject: typedContext.profile.name,
+          citedPageText,
+        });
         const groundedCitation =
-          deterministicResult === null
+          resolution.usedSupportingEvidence || profileResult === null
             ? mapperCitation
             : compilerCitation
               ? {
@@ -164,16 +204,8 @@ async function applyStageOutput(
                 };
         return {
           requirementKey: mapping.requirementKey,
-          state: resolveRequirementState(
-            mapping.proposedState,
-            deterministicResult,
-            requirement.mandatory,
-            groundedCitation.verified,
-            requirement.kind !== "document" &&
-              requirement.conditionType !== "document_present",
-          ),
-          deterministicResult:
-            deterministicResult === null ? undefined : deterministicResult,
+          state: resolution.state,
+          deterministicResult: resolution.deterministicResult,
           citation: groundedCitation,
         };
       }),
@@ -290,7 +322,7 @@ export async function POST(
         {
           key: "eligibility_mapper",
           requestedModel:
-            process.env.CHUTES_MAPPER_MODEL ?? "Qwen/Qwen3.6-27B-TEE",
+            process.env.CHUTES_MAPPER_MODEL ?? "MiniMaxAI/MiniMax-M2.5-TEE",
         },
         {
           key: "red_team_reviewer",
@@ -300,7 +332,7 @@ export async function POST(
         {
           key: "action_planner",
           requestedModel:
-            process.env.CHUTES_PLANNER_MODEL ?? "MiniMaxAI/MiniMax-M2.5-TEE",
+            process.env.CHUTES_PLANNER_MODEL ?? "zai-org/GLM-5-TEE",
         },
       ] as const,
       getAccessToken,
@@ -314,16 +346,20 @@ export async function POST(
       requirement_compiler: CompilerOutput;
       eligibility_mapper: MapperOutput;
       red_team_reviewer: ReviewerOutput;
-      action_planner: PlannerOutput;
+      action_planner: PlannerAgentOutput;
     };
     const runAgent = async <T extends StageName>(stage: T) => {
       const run = runs.get(stage);
       if (!run) throw new Error("STALE_ANALYSIS_RUN");
       const startedAt = Date.now();
       try {
+        const stageDocuments =
+          stage === "action_planner"
+            ? requestData.documents.slice(0, 1)
+            : requestData.documents;
         const result = await runStructuredStage<StageOutputByName[T]>(
           models[stage],
-          buildPrompt(stage, requestData.documents, promptContext),
+          buildPrompt(stage, stageDocuments, promptContext),
           outputSchemas[stage] as unknown as ZodType<StageOutputByName[T]>,
           OUTPUT_FORMATS[stage],
           getAccessToken,
@@ -434,8 +470,22 @@ export async function POST(
           reason:
             "The independent mapper did not return a matching assessment.",
           citation: compiled.citation,
+          claim: undefined,
         };
       },
+    );
+    const reviewerOutput = reviewer.result.data as ReviewerOutput;
+    reviewerOutput.reviews = reconcileRequirementCoverage(
+      canonicalRequirements,
+      reviewerOutput.reviews,
+      (requirement) => ({
+        requirementKey: requirement.key,
+        requirementLabel: requirement.label,
+        state: "needs_verification",
+        evidenceVerdict: "unclear",
+        reason:
+          "The independent reviewer did not return a matching conclusion.",
+      }),
     );
     await applyStageOutput(
       convex,
@@ -445,6 +495,7 @@ export async function POST(
       mapperOutput,
       compiledContext,
       requestData.documents,
+      reviewerOutput.reviews,
     );
     await convex.mutation(api.analysis.finishStage, {
       applicationId,
@@ -461,18 +512,6 @@ export async function POST(
     const mappedContext = await convex.query(api.analysis.getContext, {
       applicationId,
     });
-    const reviewerOutput = reviewer.result.data as ReviewerOutput;
-    reviewerOutput.reviews = reconcileRequirementCoverage(
-      canonicalRequirements,
-      reviewerOutput.reviews,
-      (requirement) => ({
-        requirementKey: requirement.key,
-        requirementLabel: requirement.label,
-        state: "needs_verification",
-        reason:
-          "The independent reviewer did not return a matching conclusion.",
-      }),
-    );
     const mappedState = new Map(
       mappedContext.requirements.map((requirement) => [
         requirement.key,
