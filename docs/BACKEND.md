@@ -64,22 +64,25 @@ Outcomes:
 - `GET /api/auth/chutes/session`
 - `POST /api/auth/chutes/logout`
 - `GET /api/auth/convex-token`
-- `POST /api/analyses/[id]/stages/[stage]`
+- `POST /api/analyses/[id]/ensemble`
 
-The stage endpoint is authenticated, origin-checked, sequential, and
-idempotent. It retries transient Chutes failures twice, refreshes once after a
-401, permits one schema-repair request, and gives slow TEE inference a bounded
-270-second stage budget. Timeouts are persisted as `CHUTES_STAGE_TIMEOUT`.
-The route verifies citations against normalized page text and persists only
-validated structured output. Generation and attempt fencing prevents a late
-request from writing into a restarted analysis.
+The ensemble endpoint is authenticated, origin-checked, and idempotent. It
+starts four distinct TEE model requests concurrently, exposes each validated
+model response through Convex progress, then deterministically reconciles and
+persists the outputs in dependency order. It retries transient Chutes failures
+twice, refreshes once after a 401, permits one schema-repair request, and gives
+the ensemble a bounded 270-second budget. Timeouts are persisted as
+`CHUTES_STAGE_TIMEOUT`. Generation and attempt fencing prevents a late request
+from writing into a restarted analysis.
 
 Default TEE models:
 
 - Primary: `google/gemma-4-31B-turbo-TEE`
 - Independent reviewer: `deepseek-ai/DeepSeek-V3.2-TEE`
-- Ordered fallbacks: `Qwen/Qwen3.6-27B-TEE`, then
-  `MiniMaxAI/MiniMax-M2.5-TEE`
+- Eligibility mapper: `Qwen/Qwen3.6-27B-TEE`
+- Action planner: `MiniMaxAI/MiniMax-M2.5-TEE`
+- Ordered fallbacks use the same four-model allowlist while preserving a
+  distinct model for every agent.
 
 The live model catalogue is authoritative. A configured model is used only
 when its current `confidential_compute` value is `true` and it advertises

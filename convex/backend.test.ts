@@ -10,6 +10,29 @@ function runArgs(run: { generation: number; attempt: number }) {
   return { generation: run.generation, attempt: run.attempt };
 }
 
+function ensembleRun(
+  ensemble: {
+    generation: number;
+    runs: Array<{
+      stage:
+        | "requirement_compiler"
+        | "eligibility_mapper"
+        | "red_team_reviewer"
+        | "action_planner";
+      attempt: number;
+    }>;
+  },
+  stage:
+    | "requirement_compiler"
+    | "eligibility_mapper"
+    | "red_team_reviewer"
+    | "action_planner",
+) {
+  const run = ensemble.runs.find((candidate) => candidate.stage === stage);
+  if (!run) throw new Error(`Missing ensemble run: ${stage}`);
+  return { generation: ensemble.generation, attempt: run.attempt };
+}
+
 async function createApplication(subject = "alice") {
   const t = convexTest(schema, modules);
   const user = t.withIdentity({
@@ -62,10 +85,7 @@ describe("Convex authorization", () => {
   test("enforces the analysis-service role", async () => {
     const { t, user, applicationId } = await createApplication();
     await expect(
-      user.mutation(api.analysis.beginStage, {
-        applicationId,
-        stage: "requirement_compiler",
-      }),
+      user.mutation(api.analysis.beginEnsemble, { applicationId }),
     ).rejects.toThrow("Unauthorized");
     const service = t.withIdentity({
       subject: "alice",
@@ -74,10 +94,7 @@ describe("Convex authorization", () => {
       role: "analysis_service",
     });
     await expect(
-      service.mutation(api.analysis.beginStage, {
-        applicationId,
-        stage: "requirement_compiler",
-      }),
+      service.mutation(api.analysis.beginEnsemble, { applicationId }),
     ).resolves.toMatchObject({ status: "started" });
     const bobService = t.withIdentity({
       subject: "bob",
@@ -87,11 +104,66 @@ describe("Convex authorization", () => {
     });
     await bobService.mutation(api.users.sync);
     await expect(
-      bobService.mutation(api.analysis.beginStage, {
-        applicationId,
-        stage: "requirement_compiler",
-      }),
+      bobService.mutation(api.analysis.beginEnsemble, { applicationId }),
     ).rejects.toThrow("Application not found");
+  });
+
+  test("starts four agents together and records each ready result once", async () => {
+    const { t, user, applicationId } = await createApplication();
+    const service = t.withIdentity({
+      subject: "alice",
+      tokenIdentifier: "issuer|alice-service",
+      username: "alice",
+      role: "analysis_service",
+    });
+    const ensemble = await service.mutation(api.analysis.beginEnsemble, {
+      applicationId,
+    });
+    expect(ensemble.status).toBe("started");
+    expect(ensemble.runs).toHaveLength(4);
+    await expect(
+      service.mutation(api.analysis.beginEnsemble, { applicationId }),
+    ).resolves.toMatchObject({ status: "already_running" });
+
+    for (const run of ensemble.runs) {
+      await service.mutation(api.analysis.markAgentReady, {
+        applicationId,
+        stage: run.stage,
+        generation: ensemble.generation,
+        attempt: run.attempt,
+        model: `${run.stage}-tee`,
+        confidentialCompute: true,
+        durationMs: 25,
+        inputTokens: 10,
+        outputTokens: 5,
+        promptVersion: "test",
+      });
+    }
+    const progress = await user.query(api.applications.getProgress, {
+      id: applicationId,
+    });
+    expect(progress?.modelRuns).toHaveLength(4);
+    expect(progress?.stages.every((stage) => stage.readyAt !== undefined)).toBe(
+      true,
+    );
+
+    const compilerRun = ensemble.runs.find(
+      (run) => run.stage === "requirement_compiler",
+    )!;
+    await service.mutation(api.analysis.finishStage, {
+      applicationId,
+      stage: "requirement_compiler",
+      generation: ensemble.generation,
+      attempt: compilerRun.attempt,
+      model: "requirement_compiler-tee",
+      confidentialCompute: true,
+      durationMs: 25,
+      inputTokens: 10,
+      outputTokens: 5,
+      promptVersion: "test",
+    });
+    const modelRuns = await t.run((ctx) => ctx.db.query("modelRuns").collect());
+    expect(modelRuns).toHaveLength(4);
   });
 
   test("rejects malformed profile and oversized persistent fields", async () => {
@@ -148,10 +220,10 @@ describe("Convex analysis lifecycle", () => {
       username: "alice",
       role: "analysis_service",
     });
-    const failedRun = await service.mutation(api.analysis.beginStage, {
+    const failedEnsemble = await service.mutation(api.analysis.beginEnsemble, {
       applicationId,
-      stage: "requirement_compiler",
     });
+    const failedRun = ensembleRun(failedEnsemble, "requirement_compiler");
     await service.mutation(api.analysis.failStage, {
       applicationId,
       stage: "requirement_compiler",
@@ -201,10 +273,10 @@ describe("Convex analysis lifecycle", () => {
       username: "alice",
       role: "analysis_service",
     });
-    const staleRun = await service.mutation(api.analysis.beginStage, {
+    const staleEnsemble = await service.mutation(api.analysis.beginEnsemble, {
       applicationId,
-      stage: "requirement_compiler",
     });
+    const staleRun = ensembleRun(staleEnsemble, "requirement_compiler");
     await user.mutation(api.applications.retry, {
       id: applicationId,
       sourceFileName: "reselected.pdf",
@@ -232,7 +304,7 @@ describe("Convex analysis lifecycle", () => {
     ).rejects.toThrow("STALE_ANALYSIS_RUN");
   });
 
-  test("is sequential, idempotent, and cascades deletion", async () => {
+  test("is idempotent and cascades deletion", async () => {
     const { t, user, applicationId } = await createApplication();
     const service = t.withIdentity({
       subject: "alice",
@@ -240,16 +312,10 @@ describe("Convex analysis lifecycle", () => {
       username: "alice",
       role: "analysis_service",
     });
-    await expect(
-      service.mutation(api.analysis.beginStage, {
-        applicationId,
-        stage: "eligibility_mapper",
-      }),
-    ).rejects.toThrow("sequentially");
-    const compilerRun = await service.mutation(api.analysis.beginStage, {
+    const ensemble = await service.mutation(api.analysis.beginEnsemble, {
       applicationId,
-      stage: "requirement_compiler",
     });
+    const compilerRun = ensembleRun(ensemble, "requirement_compiler");
     await service.mutation(api.analysis.applyRequirementCompiler, {
       applicationId,
       ...runArgs(compilerRun),
@@ -302,11 +368,8 @@ describe("Convex analysis lifecycle", () => {
       ),
     ).toBe(1);
     await expect(
-      service.mutation(api.analysis.beginStage, {
-        applicationId,
-        stage: "requirement_compiler",
-      }),
-    ).resolves.toMatchObject({ status: "already_complete" });
+      service.mutation(api.analysis.beginEnsemble, { applicationId }),
+    ).resolves.toMatchObject({ status: "already_running" });
 
     await user.mutation(api.applications.remove, { id: applicationId });
     const counts = await t.run(async (ctx) => ({
@@ -440,10 +503,10 @@ describe("Convex analysis lifecycle", () => {
       });
     };
 
-    const compilerRun = await service.mutation(api.analysis.beginStage, {
+    const ensemble = await service.mutation(api.analysis.beginEnsemble, {
       applicationId,
-      stage: "requirement_compiler",
     });
+    const compilerRun = ensembleRun(ensemble, "requirement_compiler");
     await service.mutation(api.analysis.applyRequirementCompiler, {
       applicationId,
       ...runArgs(compilerRun),
@@ -476,10 +539,7 @@ describe("Convex analysis lifecycle", () => {
     });
     await finish("requirement_compiler", compilerRun);
 
-    const mapperRun = await service.mutation(api.analysis.beginStage, {
-      applicationId,
-      stage: "eligibility_mapper",
-    });
+    const mapperRun = ensembleRun(ensemble, "eligibility_mapper");
     await service.mutation(api.analysis.applyEligibilityMapper, {
       applicationId,
       ...runArgs(mapperRun),
@@ -501,10 +561,7 @@ describe("Convex analysis lifecycle", () => {
     });
     await finish("eligibility_mapper", mapperRun);
 
-    const reviewerRun = await service.mutation(api.analysis.beginStage, {
-      applicationId,
-      stage: "red_team_reviewer",
-    });
+    const reviewerRun = ensembleRun(ensemble, "red_team_reviewer");
     await service.mutation(api.analysis.applyRedTeamReviewer, {
       applicationId,
       ...runArgs(reviewerRun),
@@ -518,10 +575,7 @@ describe("Convex analysis lifecycle", () => {
     });
     await finish("red_team_reviewer", reviewerRun, "independent-reviewer-tee");
 
-    const plannerRun = await service.mutation(api.analysis.beginStage, {
-      applicationId,
-      stage: "action_planner",
-    });
+    const plannerRun = ensembleRun(ensemble, "action_planner");
     await service.mutation(api.analysis.applyActionPlanner, {
       applicationId,
       ...runArgs(plannerRun),

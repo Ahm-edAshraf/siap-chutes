@@ -4,6 +4,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import {
   applicationDoc,
   eventDoc,
+  modelRunDoc,
   reportBundle,
   stageDoc,
 } from "./documentValidators";
@@ -169,13 +170,14 @@ export const getProgress = query({
       application: applicationDoc,
       stages: v.array(stageDoc),
       events: v.array(eventDoc),
+      modelRuns: v.array(modelRunDoc),
     }),
   ),
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
     const application = await ctx.db.get("applications", args.id);
     if (!application || application.userId !== user._id) return null;
-    const [stages, events] = await Promise.all([
+    const [stages, events, modelRuns] = await Promise.all([
       ctx.db
         .query("analysisStages")
         .withIndex("by_application", (q) => q.eq("applicationId", args.id))
@@ -184,8 +186,12 @@ export const getProgress = query({
         .query("analysisEvents")
         .withIndex("by_application", (q) => q.eq("applicationId", args.id))
         .collect(),
+      ctx.db
+        .query("modelRuns")
+        .withIndex("by_application", (q) => q.eq("applicationId", args.id))
+        .collect(),
     ]);
-    return { application, stages, events };
+    return { application, stages, events, modelRuns };
   },
 });
 

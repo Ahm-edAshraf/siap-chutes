@@ -11,7 +11,6 @@ import {
 } from "lucide-react";
 import { api } from "@/convex/_generated/api";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { ReadinessScore } from "@/components/ui/ReadinessScore";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { outcomeLabel, outcomeVariant } from "@/lib/presentation";
@@ -105,10 +104,6 @@ export default function OverviewDashboard() {
                 key={application._id}
                 className={`p-5 flex flex-col md:flex-row md:items-center gap-5 ${index < Math.min(applications.length, 5) - 1 ? "rule-bottom" : ""}`}
               >
-                <ReadinessScore
-                  score={application.readinessScore}
-                  className="hidden md:block scale-75 origin-left"
-                />
                 <div className="flex-1 min-w-0">
                   <div className="flex flex-wrap gap-3 items-center">
                     <h3 className="font-medium text-lg truncate">

@@ -91,6 +91,7 @@ export const mapperOutputSchema = z.object({
     .array(
       z.object({
         requirementKey: z.string().min(1).max(64),
+        requirementLabel: z.string().min(1).max(200),
         proposedState: z.enum([
           "confirmed",
           "needs_verification",
@@ -109,6 +110,7 @@ export const reviewerOutputSchema = z.object({
     .array(
       z.object({
         requirementKey: z.string().min(1).max(64),
+        requirementLabel: z.string().min(1).max(200),
         state: z.enum([
           "confirmed",
           "needs_verification",

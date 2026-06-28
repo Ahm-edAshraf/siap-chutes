@@ -13,7 +13,7 @@ import { GET as login } from "@/app/api/auth/chutes/login/route";
 import { GET as callback } from "@/app/api/auth/chutes/callback/route";
 import { POST as logout } from "@/app/api/auth/chutes/logout/route";
 import { GET as convexToken } from "@/app/api/auth/convex-token/route";
-import { POST as runStage } from "@/app/api/analyses/[id]/stages/[stage]/route";
+import { POST as runEnsemble } from "@/app/api/analyses/[id]/ensemble/route";
 import { AUTH_COOKIES } from "@/lib/auth/cookies";
 
 const { cookieValues, cookieOptions } = vi.hoisted(() => ({
@@ -183,23 +183,19 @@ describe("authentication route handlers", () => {
     expect(Number(claims.exp) - Number(claims.iat)).toBe(300);
   });
 
-  test("analysis stage handler rejects cross-origin requests before processing", async () => {
-    const response = await runStage(
-      new Request(
-        "https://siap.test/api/analyses/not-an-id/stages/action_planner",
-        {
-          method: "POST",
-          headers: {
-            origin: "https://attacker.test",
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({ documents: [] }),
+  test("analysis ensemble handler rejects cross-origin requests before processing", async () => {
+    const response = await runEnsemble(
+      new Request("https://siap.test/api/analyses/not-an-id/ensemble", {
+        method: "POST",
+        headers: {
+          origin: "https://attacker.test",
+          "content-type": "application/json",
         },
-      ),
+        body: JSON.stringify({ documents: [] }),
+      }),
       {
         params: Promise.resolve({
           id: "not-an-id",
-          stage: "action_planner",
         }),
       },
     );

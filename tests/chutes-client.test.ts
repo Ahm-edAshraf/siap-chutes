@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from "vitest";
 import { z } from "zod";
 import {
   runStructuredStage,
+  selectDistinctTeeModels,
   selectTeeModel,
 } from "@/lib/analysis/chutes-client";
 
@@ -83,6 +84,53 @@ describe("Chutes reliability", () => {
     ).resolves.toBe("Qwen/Qwen3.6-27B-TEE");
   });
 
+  test("selects a distinct structured-output TEE model for every agent", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse({
+        data: [
+          "google/gemma-4-31B-turbo-TEE",
+          "Qwen/Qwen3.6-27B-TEE",
+          "deepseek-ai/DeepSeek-V3.2-TEE",
+          "MiniMaxAI/MiniMax-M2.5-TEE",
+        ].map((id) => ({
+          id,
+          confidential_compute: true,
+          supported_features: ["structured_outputs"],
+        })),
+      }),
+    );
+    await expect(
+      selectDistinctTeeModels(
+        [
+          {
+            key: "compiler",
+            requestedModel: "google/gemma-4-31B-turbo-TEE",
+          },
+          {
+            key: "mapper",
+            requestedModel: "Qwen/Qwen3.6-27B-TEE",
+          },
+          {
+            key: "reviewer",
+            requestedModel: "Qwen/Qwen3.6-27B-TEE",
+          },
+          {
+            key: "planner",
+            requestedModel: "MiniMaxAI/MiniMax-M2.5-TEE",
+          },
+        ] as const,
+        async () => "token",
+        { fetchImpl },
+      ),
+    ).resolves.toEqual({
+      compiler: "google/gemma-4-31B-turbo-TEE",
+      mapper: "Qwen/Qwen3.6-27B-TEE",
+      reviewer: "deepseek-ai/DeepSeek-V3.2-TEE",
+      planner: "MiniMaxAI/MiniMax-M2.5-TEE",
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   test("refreshes once after 401 and retries 429", async () => {
     const fetchImpl = vi
       .fn()
@@ -152,6 +200,26 @@ describe("Chutes reliability", () => {
       json_schema: { strict: true },
     });
     expect(body.response_format.json_schema.schema).toBeTruthy();
+  });
+
+  test("applies an agent-specific output-token cap", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse({
+        choices: [{ message: { content: '{"ok":true}' } }],
+      }),
+    );
+    await runStructuredStage(
+      "tee-model",
+      "prompt",
+      z.object({ ok: z.boolean() }),
+      "{ok:boolean}",
+      async () => "token",
+      { fetchImpl, maxTokens: 6_000 },
+    );
+    const body = JSON.parse(
+      String((fetchImpl.mock.calls[0][1] as RequestInit).body),
+    ) as { max_tokens: number };
+    expect(body.max_tokens).toBe(6_000);
   });
 
   test("retries network and 5xx failures only twice", async () => {

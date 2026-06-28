@@ -49,7 +49,7 @@ test.describe("paid authenticated flow", () => {
       })
       .click();
     await page.route(
-      "**/api/analyses/*/stages/*",
+      "**/api/analyses/*/ensemble",
       async (route) => {
         await route.fulfill({
           status: 502,
@@ -71,9 +71,6 @@ test.describe("paid authenticated flow", () => {
     await page.getByRole("button", { name: "Continue" }).click();
     await page.getByRole("button", { name: "Extract and analyse" }).click();
     await expect(page).toHaveURL(/\/app\/analysing\//);
-    await expect(
-      page.getByRole("heading", { name: "Analysing application" }),
-    ).toBeVisible();
     await expect(
       page.getByRole("heading", { name: "Analysis failed safely" }),
     ).toBeVisible();
@@ -101,7 +98,7 @@ test.describe("paid authenticated flow", () => {
     await expect(
       page.getByRole("heading", { name: "Eligibility checks" }),
     ).toBeVisible();
-    await expect(page.getByText("/80 evidence readiness")).toBeVisible();
+    await expect(page.getByText("requirements confirmed")).toBeVisible();
 
     const firstAction = page.getByTitle("Mark complete").first();
     if ((await firstAction.count()) > 0) {
@@ -121,9 +118,11 @@ test.describe("paid authenticated flow", () => {
     const exported = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
       application: { state: string };
       modelRuns: Array<{
+        _creationTime: number;
         stage: string;
         model: string;
         confidentialCompute: boolean;
+        durationMs: number;
       }>;
       requirements: Array<{
         evidence: Array<{ excerpt: string }>;
@@ -134,6 +133,13 @@ test.describe("paid authenticated flow", () => {
     expect(exported.modelRuns.every((run) => run.confidentialCompute)).toBe(
       true,
     );
+    expect(new Set(exported.modelRuns.map((run) => run.model)).size).toBe(4);
+    const inferredStarts = exported.modelRuns.map(
+      (run) => run._creationTime - run.durationMs,
+    );
+    expect(
+      Math.max(...inferredStarts) - Math.min(...inferredStarts),
+    ).toBeLessThan(10_000);
     const primaryModel = exported.modelRuns.find(
       (run) => run.stage === "requirement_compiler",
     )?.model;

@@ -112,9 +112,11 @@
 
   Expose an authenticated, origin-checked route:
 
-  POST /api/analyses/[id]/stages/[stage]
+  POST /api/analyses/[id]/ensemble
 
-  Stages are idempotent and sequential:
+  Agents are idempotent and run concurrently. Each independently analyses the
+  same browser-supplied evidence package; validated outputs are reconciled and
+  persisted in dependency order:
 
   1. Requirement compiler
       - Extract programme metadata, deadline, requirements, mandatory documents, citations, and machine-readable conditions.
@@ -130,9 +132,10 @@
 
   Model defaults:
 
-  - Primary: google/gemma-4-31B-turbo-TEE
+  - Requirement compiler: google/gemma-4-31B-turbo-TEE
+  - Eligibility mapper: Qwen/Qwen3.6-27B-TEE
   - Reviewer: deepseek-ai/DeepSeek-V3.2-TEE
-  - Fallback allowlist: Qwen/Qwen3.6-27B-TEE, then MiniMaxAI/MiniMax-M2.5-TEE
+  - Action planner: MiniMaxAI/MiniMax-M2.5-TEE
 
   Before inference, query the live model catalogue and require confidential_compute: true. Fail closed if no approved TEE model is available. Persist the actual model, TEE status,
   duration, token usage, prompt version, and outcome—but no content. This follows Chutes’ documented confidential-compute privacy model (https://chutes.ai/privacy).

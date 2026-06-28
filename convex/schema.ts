@@ -70,6 +70,7 @@ export default defineSchema({
     attempt: v.number(),
     errorCode: v.optional(v.string()),
     startedAt: v.optional(v.number()),
+    readyAt: v.optional(v.number()),
     completedAt: v.optional(v.number()),
     updatedAt: v.number(),
   })

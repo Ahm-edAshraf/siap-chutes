@@ -2,9 +2,9 @@
 
 import React from "react";
 import { motion } from "motion/react";
-import { CheckCircle2, Loader2, Circle } from "lucide-react";
+import { CheckCircle2, Loader2, Circle, ShieldCheck } from "lucide-react";
 
-export type StageStatus = "queued" | "running" | "complete";
+export type StageStatus = "queued" | "running" | "ready" | "complete";
 
 export interface Stage {
   id: string;
@@ -24,7 +24,7 @@ export function AnalysisStage({ stage, isActive }: AnalysisStageProps) {
       className={`flex gap-4 p-4 rounded border transition-colors ${
         isActive
           ? "border-siap-ink bg-white shadow-sm"
-          : stage.status === "complete"
+          : stage.status === "complete" || stage.status === "ready"
             ? "border-siap-gray/50 bg-siap-gray/5"
             : "border-siap-gray/30 opacity-50"
       }`}
@@ -35,6 +35,9 @@ export function AnalysisStage({ stage, isActive }: AnalysisStageProps) {
         )}
         {stage.status === "running" && (
           <Loader2 className="w-5 h-5 text-siap-teal animate-spin" />
+        )}
+        {stage.status === "ready" && (
+          <ShieldCheck className="w-5 h-5 text-siap-teal" />
         )}
         {stage.status === "queued" && (
           <Circle className="w-5 h-5 text-siap-gray" />

@@ -9,7 +9,6 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { AnalysisStage, type Stage } from "@/components/ui/AnalysisStage";
 import { ErrorState } from "@/components/ui/ErrorState";
-import { ReadinessScore } from "@/components/ui/ReadinessScore";
 import { useDocumentSession } from "@/contexts/DocumentSessionContext";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { stageNames, type StageName } from "@/lib/analysis/schemas";
@@ -33,24 +32,29 @@ export default function AnalysingPage() {
   const progress = useQuery(api.applications.getProgress, { id });
   const retry = useMutation(api.applications.retry);
   const remove = useMutation(api.applications.remove);
-  const requested = useRef(new Set<StageName>());
+  const requested = useRef(false);
   const [requestError, setRequestError] = useState<string | null>(null);
 
   const stages = useMemo<Stage[]>(
     () =>
       stageNames.map((name) => {
         const stored = progress?.stages.find((stage) => stage.stage === name);
+        const modelRun = progress?.modelRuns.find(
+          (run) => run.stage === name && run.outcome === "success",
+        );
         return {
           id: name,
           label: t(...LABELS[name]),
           status:
             stored?.status === "complete"
               ? "complete"
-              : stored?.status === "running"
-                ? "running"
-                : "queued",
-          subEvents:
-            progress?.events
+              : stored?.readyAt !== undefined
+                ? "ready"
+                : stored?.status === "running"
+                  ? "running"
+                  : "queued",
+          subEvents: [
+            ...(progress?.events
               .filter((event) => event.stage === name)
               .map((event) =>
                 event.type === "completed"
@@ -67,7 +71,16 @@ export default function AnalysingPage() {
                         "Stage failed safely",
                         "Peringkat gagal dengan selamat",
                       ),
-              ) ?? [],
+              ) ?? []),
+            ...(modelRun
+              ? [
+                  t(
+                    `${modelRun.model} returned verified TEE output in ${(modelRun.durationMs / 1_000).toFixed(1)}s`,
+                    `${modelRun.model} mengembalikan output TEE yang disahkan dalam ${(modelRun.durationMs / 1_000).toFixed(1)}s`,
+                  ),
+                ]
+              : []),
+          ],
         };
       }),
     [progress, t],
@@ -81,15 +94,13 @@ export default function AnalysingPage() {
     }
     if (!documents || !progress || progress.application.state === "failed")
       return;
-    const next = progress.stages.find((stage) => stage.status !== "complete");
     if (
-      !next ||
-      next.status !== "pending" ||
-      requested.current.has(next.stage)
+      requested.current ||
+      !progress.stages.some((stage) => stage.status === "pending")
     )
       return;
-    requested.current.add(next.stage);
-    void fetch(`/api/analyses/${id}/stages/${next.stage}`, {
+    requested.current = true;
+    void fetch(`/api/analyses/${id}/ensemble`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ documents }),
@@ -156,7 +167,7 @@ export default function AnalysingPage() {
           onRetry={() => {
             void retry({ id })
               .then(() => {
-                requested.current.clear();
+                requested.current = false;
                 setRequestError(null);
               })
               .catch(() => setRequestError("RETRY_REQUEST_FAILED"));
@@ -166,21 +177,21 @@ export default function AnalysingPage() {
     );
   }
 
-  const completeCount = progress.stages.filter(
-    (stage) => stage.status === "complete",
+  const readyCount = progress.stages.filter(
+    (stage) => stage.status === "complete" || stage.readyAt !== undefined,
   ).length;
-  const readiness = Math.round((completeCount / progress.stages.length) * 80);
   const activeIndex = progress.stages.findIndex(
-    (stage) => stage.status === "running",
+    (stage) => stage.status === "running" && stage.readyAt === undefined,
   );
   return (
     <div className="max-w-2xl mx-auto py-8">
       <div className="mb-10 text-center flex flex-col items-center">
-        <ReadinessScore
-          score={readiness}
-          label={t("Progress", "Kemajuan")}
-          className="scale-[0.85]"
-        />
+        <p className="text-xs uppercase tracking-[0.18em] text-siap-ink/55">
+          {t(
+            `${readyCount} of ${progress.stages.length} agent responses ready`,
+            `${readyCount} daripada ${progress.stages.length} respons ejen sedia`,
+          )}
+        </p>
         <h1 className="text-3xl font-serif font-medium mt-4 flex items-center gap-3">
           {t("Analysing application", "Menganalisis permohonan")}
           <Loader2 className="w-6 h-6 text-siap-teal animate-spin" />
@@ -188,8 +199,8 @@ export default function AnalysingPage() {
         <div className="flex items-center gap-2 text-xs font-medium text-siap-teal mt-3 bg-siap-teal/10 px-3 py-1 rounded-full">
           <Shield className="w-3.5 h-3.5" />
           {t(
-            "Verified Chutes confidential compute",
-            "Pengkomputeran sulit Chutes yang disahkan",
+            "Four independent Chutes TEE agents running in parallel",
+            "Empat ejen TEE Chutes bebas berjalan secara selari",
           )}
         </div>
       </div>

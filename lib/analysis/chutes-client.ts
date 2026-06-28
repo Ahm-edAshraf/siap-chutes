@@ -7,7 +7,9 @@ const MODEL_ENDPOINT = "https://llm.chutes.ai/v1/models";
 const COMPLETIONS_ENDPOINT = "https://llm.chutes.ai/v1/chat/completions";
 
 const FALLBACK_MODELS = [
+  "google/gemma-4-31B-turbo-TEE",
   "Qwen/Qwen3.6-27B-TEE",
+  "deepseek-ai/DeepSeek-V3.2-TEE",
   "MiniMaxAI/MiniMax-M2.5-TEE",
 ] as const;
 
@@ -45,6 +47,7 @@ export interface ChutesRequestOptions {
   fetchImpl?: typeof fetch;
   sleep?: (milliseconds: number) => Promise<void>;
   deadlineAt?: number;
+  maxTokens?: number;
 }
 
 function stageTimeout() {
@@ -162,6 +165,44 @@ export async function selectTeeModel(
   return selected;
 }
 
+export async function selectDistinctTeeModels<T extends string>(
+  requests: ReadonlyArray<{ key: T; requestedModel: string }>,
+  getAccessToken: AccessTokenProvider,
+  options: ChutesRequestOptions = {},
+): Promise<Record<T, string>> {
+  const response = await requestWithRetry(
+    MODEL_ENDPOINT,
+    { method: "GET" },
+    getAccessToken,
+    30_000,
+    options,
+  );
+  if (!response.ok) {
+    throw new Error(`CHUTES_MODEL_CATALOG_${response.status}`);
+  }
+  const catalog = modelCatalogSchema.parse(await response.json());
+  const approved = new Set(
+    catalog.data
+      .filter(
+        (model) =>
+          model.confidential_compute &&
+          model.supported_features?.includes("structured_outputs"),
+      )
+      .map((model) => model.id),
+  );
+  const used = new Set<string>();
+  const selected = {} as Record<T, string>;
+  for (const request of requests) {
+    const model = [request.requestedModel, ...FALLBACK_MODELS].find(
+      (candidate) => approved.has(candidate) && !used.has(candidate),
+    );
+    if (!model) throw new Error("NO_APPROVED_TEE_MODEL");
+    selected[request.key] = model;
+    used.add(model);
+  }
+  return selected;
+}
+
 async function createCompletion<T>(
   model: string,
   prompt: string,
@@ -195,7 +236,7 @@ async function createCompletion<T>(
           },
         },
         temperature: 0.1,
-        max_tokens: 8_000,
+        max_tokens: options.maxTokens ?? 8_000,
       }),
     },
     getAccessToken,

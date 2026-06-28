@@ -84,8 +84,10 @@ export default function ReportsPage() {
                   label={outcomeLabel(application.outcome)}
                   variant={outcomeVariant(application.outcome)}
                 />
-                <span className="text-xs font-medium">
-                  {application.readinessScore}%
+                <span className="text-xs text-siap-ink/55">
+                  {application.state === "complete"
+                    ? t("Report ready", "Laporan sedia")
+                    : t("In progress", "Sedang berjalan")}
                 </span>
               </div>
               <div className="p-5 flex-1">

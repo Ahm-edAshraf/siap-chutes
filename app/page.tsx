@@ -36,10 +36,14 @@ export default async function LandingPage({
   const store = await cookies();
   const isSignedIn = Boolean(
     store.get(AUTH_COOKIES.access)?.value ||
-      store.get(AUTH_COOKIES.refresh)?.value,
+    store.get(AUTH_COOKIES.refresh)?.value,
   );
-  const primaryHref = isSignedIn ? "/app" : "/api/auth/chutes/login?returnTo=/app/new";
-  const primaryLabel = isSignedIn ? "Go to your workspace" : "Sign in with Chutes";
+  const primaryHref = isSignedIn
+    ? "/app"
+    : "/api/auth/chutes/login?returnTo=/app/new";
+  const primaryLabel = isSignedIn
+    ? "Go to your workspace"
+    : "Sign in with Chutes";
   return (
     <div className="min-h-screen flex flex-col text-siap-ink">
       <header className="py-6 px-6 md:px-12 flex justify-between items-center border-b border-siap-ink">
@@ -118,7 +122,9 @@ export default async function LandingPage({
                   Evidence before confidence
                 </h2>
               </div>
-              <span className="font-serif text-4xl text-siap-teal">68%</span>
+              <span className="text-xs uppercase tracking-wider text-siap-teal border border-siap-teal/30 rounded px-3 py-1.5">
+                Evidence review
+              </span>
             </div>
             <div className="mt-6 space-y-5">
               {[

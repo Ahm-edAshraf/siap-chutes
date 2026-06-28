@@ -17,7 +17,6 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { ActionTimeline } from "@/components/ui/ActionTimeline";
 import { EvidenceDrawer } from "@/components/ui/EvidenceDrawer";
 import { ErrorState } from "@/components/ui/ErrorState";
-import { ReadinessScore } from "@/components/ui/ReadinessScore";
 import { RequirementRow } from "@/components/ui/RequirementRow";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useToast } from "@/components/ToastProvider";
@@ -160,6 +159,9 @@ export default function ReportDetailPage() {
   const verify = bundle.requirements.filter(
     (item) => item.state === "needs_verification",
   ).length;
+  const completedActions = bundle.actions.filter(
+    (action) => action.status === "completed",
+  ).length;
   const emailAction = bundle.actions.find((action) => action.emailDraft);
 
   const exportReport = () => {
@@ -265,36 +267,38 @@ export default function ReportDetailPage() {
       </header>
 
       <div className="grid md:grid-cols-12 gap-6 mb-10">
-        <div className="md:col-span-8 bg-white border border-siap-ink rounded p-6 flex flex-col sm:flex-row items-center gap-7">
-          <ReadinessScore score={application.readinessScore} />
-          <div>
-            <p className="font-serif text-xl font-medium">
-              {application.summary ?? outcomeLabel(application.outcome)}
-            </p>
-            <div className="flex gap-5 mt-4 text-sm">
-              <span className="text-siap-green">
-                {confirmed} {t("confirmed", "disahkan")}
-              </span>
-              <span className="text-siap-amber">
-                {verify} {t("verify", "semak")}
-              </span>
-              <span className="text-siap-red">
-                {incomplete} {t("not ready", "belum sedia")}
-              </span>
+        <div className="md:col-span-8 bg-white border border-siap-ink rounded p-6">
+          <div className="flex items-start gap-4">
+            <CheckCircle2 className="w-7 h-7 text-siap-teal shrink-0 mt-0.5" />
+            <div>
+              <p className="font-serif text-xl font-medium">
+                {application.summary ?? outcomeLabel(application.outcome)}
+              </p>
+              <div className="flex flex-wrap gap-x-5 gap-y-2 mt-4 text-sm">
+                <span className="text-siap-green">
+                  {confirmed} {t("confirmed", "disahkan")}
+                </span>
+                <span className="text-siap-amber">
+                  {verify} {t("verify", "semak")}
+                </span>
+                <span className="text-siap-red">
+                  {incomplete} {t("not ready", "belum sedia")}
+                </span>
+              </div>
             </div>
           </div>
         </div>
         <div className="md:col-span-4 bg-siap-gray/10 border border-siap-gray rounded p-5">
           <h2 className="text-xs uppercase tracking-wider font-medium text-siap-ink/60 mb-3">
-            {t("Score composition", "Komposisi skor")}
+            {t("Application checklist", "Senarai semak permohonan")}
           </h2>
           <p className="text-sm">
-            {application.evidenceScore}/80{" "}
-            {t("evidence readiness", "kesediaan bukti")}
+            {confirmed} {t("of", "daripada")} {bundle.requirements.length}{" "}
+            {t("requirements confirmed", "keperluan disahkan")}
           </p>
           <p className="text-sm mt-2">
-            {application.actionScore}/20{" "}
-            {t("completed actions", "tindakan selesai")}
+            {completedActions} {t("of", "daripada")} {bundle.actions.length}{" "}
+            {t("actions completed", "tindakan selesai")}
           </p>
         </div>
       </div>

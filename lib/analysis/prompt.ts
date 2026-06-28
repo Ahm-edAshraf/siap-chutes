@@ -18,22 +18,22 @@ function renderDocuments(documents: ExtractedDocument[]) {
 
 const TASKS: Record<StageName, string> = {
   requirement_compiler:
-    "Compile programme metadata and every explicit eligibility rule. Give each rule a stable snake_case key, weight, mandatory flag, machine-readable condition when possible, and an exact source quote.",
+    "Compile programme metadata and every explicit eligibility rule in source order. Assign keys req_001, req_002, and so on in that exact order. Include a weight, mandatory flag, machine-readable condition when possible, and an exact source quote.",
   eligibility_mapper:
-    "Map the supplied profile and evidence to every compiled requirement. Distinguish missing evidence from a definite rule violation. Never confirm without an exact source citation.",
+    "Independently enumerate every explicit eligibility rule in source order using keys req_001, req_002, and so on, copy a concise requirement label, then map the supplied profile and evidence to each rule. Distinguish missing evidence from a definite rule violation. Never confirm without an exact source citation.",
   red_team_reviewer:
-    "Independently challenge every conclusion. Downgrade unsupported assumptions, incorrect citations, and false confirmations. Never upgrade a conclusion.",
+    "Independently enumerate every explicit eligibility rule in source order using keys req_001, req_002, and so on, copy a concise requirement label, and produce a conservative eligibility conclusion. Treat unsupported assumptions, citation gaps, and uncertain facts as needs_verification or worse. This output may only preserve or downgrade the mapper's conclusion during deterministic reconciliation.",
   action_planner:
-    "Build missing-document records and a dependency-aware ordered action plan. Include concise contextual email drafts only when useful.",
+    "Independently build missing-document records and a dependency-aware ordered action plan from the supplied profile and source documents. Omit requirementKey unless a source-order req_NNN identifier is unambiguous. Include concise contextual email drafts only when useful.",
 };
 
 export const OUTPUT_FORMATS: Record<StageName, string> = {
   requirement_compiler:
     '{"programme":{"name":"string","deadline":"optional string","summary":"string"},"requirements":[{"key":"snake_case","label":"string","description":"optional string","kind":"citizenship|age|income|study_level|document|deadline|numeric|other","weight":1,"mandatory":true,"condition":{"type":"citizenship_equals|age_max_on|income_max|study_level_in|document_present|deadline_after|numeric|other","expectedString":"optional","threshold":0,"operator":"optional lt|lte|eq|gte|gt","profileField":"optional householdIncome","comparisonDate":"optional YYYY-MM-DD","acceptedValues":["optional"],"documentNames":["optional"]},"citation":{"documentName":"exact input filename","pageNumber":1,"quote":"exact source quote","confidence":"high|medium|low"}}]}',
   eligibility_mapper:
-    '{"mappings":[{"requirementKey":"existing key","proposedState":"confirmed|needs_verification|incomplete|not_met","reason":"string","citation":{"documentName":"exact input filename","pageNumber":1,"quote":"exact source quote","confidence":"high|medium|low"}}]}',
+    '{"mappings":[{"requirementKey":"req_001","requirementLabel":"string","proposedState":"confirmed|needs_verification|incomplete|not_met","reason":"string","citation":{"documentName":"exact input filename","pageNumber":1,"quote":"exact source quote","confidence":"high|medium|low"}}]}',
   red_team_reviewer:
-    '{"reviews":[{"requirementKey":"existing key","state":"confirmed|needs_verification|incomplete|not_met","reason":"string"}]}',
+    '{"reviews":[{"requirementKey":"req_001","requirementLabel":"string","state":"confirmed|needs_verification|incomplete|not_met","reason":"string"}]}',
   action_planner:
     '{"missingDocuments":[{"requirementKey":"optional existing key","name":"string","urgency":"critical|required|optional","owner":"string","suggestedDate":"string","action":"string"}],"actions":[{"key":"snake_case","description":"string","owner":"optional string","urgency":"optional critical|required|optional","dependsOn":["action keys"],"emailDraft":"optional string"}]}',
 };

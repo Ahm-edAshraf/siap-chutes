@@ -114,10 +114,9 @@ export const getContext = query({
   },
 });
 
-export const beginStage = mutation({
+export const beginEnsemble = mutation({
   args: {
     applicationId: v.id("applications"),
-    stage: stageName,
   },
   returns: v.object({
     status: v.union(
@@ -126,7 +125,12 @@ export const beginStage = mutation({
       v.literal("already_running"),
     ),
     generation: v.number(),
-    attempt: v.number(),
+    runs: v.array(
+      v.object({
+        stage: stageName,
+        attempt: v.number(),
+      }),
+    ),
   }),
   handler: async (ctx, args) => {
     await requireAnalysisService(ctx);
@@ -134,85 +138,135 @@ export const beginStage = mutation({
       ctx,
       args.applicationId,
     );
-    if (application.state === "failed") {
-      throw new Error("Retry the failed application before continuing");
-    }
-    const stage = await requireStage(ctx, args.applicationId, args.stage);
     const generation = application.analysisGeneration ?? 0;
-    const stageGeneration = stage.generation ?? 0;
-    if (stageGeneration !== generation) {
-      throw new Error("STALE_ANALYSIS_RUN");
-    }
-    if (stage.status === "complete") {
-      return {
-        status: "already_complete" as const,
-        generation: stageGeneration,
-        attempt: stage.attempt,
-      };
-    }
-    if (
-      stage.status === "running" &&
-      stage.startedAt !== undefined &&
-      stage.startedAt > Date.now() - 10 * 60 * 1_000
-    ) {
-      return {
-        status: "already_running" as const,
-        generation: stageGeneration,
-        attempt: stage.attempt,
-      };
-    }
-    const previous = await ctx.db
+    const stages = await ctx.db
       .query("analysisStages")
       .withIndex("by_application", (q) =>
         q.eq("applicationId", args.applicationId),
       )
       .collect();
+    if (stages.length !== 4) throw new Error("Analysis stages are incomplete");
+    if (application.state === "complete") {
+      return {
+        status: "already_complete" as const,
+        generation,
+        runs: stages.map((stage) => ({
+          stage: stage.stage,
+          attempt: stage.attempt,
+        })),
+      };
+    }
+    if (application.state === "failed") {
+      throw new Error("Retry the failed application before continuing");
+    }
     if (
-      previous.some(
-        (candidate) =>
-          candidate.order < stage.order && candidate.status !== "complete",
+      stages.some(
+        (stage) =>
+          stage.status === "running" &&
+          stage.startedAt !== undefined &&
+          stage.startedAt > Date.now() - 10 * 60 * 1_000,
       )
     ) {
-      throw new Error("Analysis stages must run sequentially");
+      return {
+        status: "already_running" as const,
+        generation,
+        runs: stages.map((stage) => ({
+          stage: stage.stage,
+          attempt: stage.attempt,
+        })),
+      };
     }
+
     const now = Date.now();
-    await ctx.db.patch("analysisStages", stage._id, {
-      status: "running",
-      generation,
-      attempt: stage.attempt + 1,
-      startedAt: now,
-      completedAt: undefined,
-      errorCode: undefined,
-      updatedAt: now,
-    });
+    const runs: Array<{ stage: AnalysisStageName; attempt: number }> = [];
+    for (const stage of stages) {
+      if ((stage.generation ?? 0) !== generation) {
+        throw new Error("STALE_ANALYSIS_RUN");
+      }
+      const attempt = stage.attempt + 1;
+      runs.push({ stage: stage.stage, attempt });
+      await ctx.db.patch("analysisStages", stage._id, {
+        status: "running",
+        generation,
+        attempt,
+        startedAt: now,
+        readyAt: undefined,
+        completedAt: undefined,
+        errorCode: undefined,
+        updatedAt: now,
+      });
+      await ctx.db.insert("analysisEvents", {
+        userId: application.userId,
+        applicationId: args.applicationId,
+        stage: stage.stage,
+        type: "started",
+        messageKey: `stage.${stage.stage}.started_parallel`,
+        createdAt: now,
+      });
+    }
     await ctx.db.patch("applications", args.applicationId, {
-      state:
-        args.stage === "requirement_compiler"
-          ? "reading_requirements"
-          : args.stage === "eligibility_mapper"
-            ? "checking_eligibility"
-            : args.stage === "red_team_reviewer"
-              ? "challenging_assumptions"
-              : "building_plan",
+      state: "reading_requirements",
       outcome: "analysing",
       analysisGeneration: generation,
       startedAt: application.startedAt ?? now,
       errorCode: undefined,
       updatedAt: now,
     });
-    await ctx.db.insert("analysisEvents", {
-      userId: application.userId,
-      applicationId: args.applicationId,
-      stage: args.stage,
-      type: "started",
-      messageKey: `stage.${args.stage}.started`,
-      createdAt: now,
-    });
     return {
       status: "started" as const,
       generation,
-      attempt: stage.attempt + 1,
+      runs,
     };
+  },
+});
+
+export const markAgentReady = mutation({
+  args: {
+    applicationId: v.id("applications"),
+    stage: stageName,
+    generation: v.number(),
+    attempt: v.number(),
+    model: v.string(),
+    confidentialCompute: v.boolean(),
+    durationMs: v.number(),
+    inputTokens: v.optional(v.number()),
+    outputTokens: v.optional(v.number()),
+    promptVersion: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await requireAnalysisService(ctx);
+    const { user } = await requireOwnedApplication(ctx, args.applicationId);
+    const stage = await requireRunningStageRun(
+      ctx,
+      args.applicationId,
+      args.stage,
+      args.generation,
+      args.attempt,
+    );
+    if (stage.readyAt !== undefined) return null;
+    if (!args.confidentialCompute) {
+      throw new Error("Non-confidential model runs cannot be persisted");
+    }
+    const now = Date.now();
+    await ctx.db.insert("modelRuns", {
+      userId: user._id,
+      applicationId: args.applicationId,
+      stage: args.stage,
+      model: args.model,
+      confidentialCompute: true,
+      durationMs: args.durationMs,
+      inputTokens: args.inputTokens,
+      outputTokens: args.outputTokens,
+      promptVersion: args.promptVersion,
+      outcome: "success",
+      createdAt: now,
+    });
+    await ctx.db.patch("analysisStages", stage._id, {
+      readyAt: now,
+      updatedAt: now,
+    });
+    return null;
   },
 });
 
@@ -464,11 +518,12 @@ export const applyRedTeamReviewer = mutation({
       if (!requirement) {
         throw new Error(`Unknown requirement key: ${review.requirementKey}`);
       }
-      if (STATE_RANK[review.state] > STATE_RANK[requirement.state]) {
-        throw new Error("The independent reviewer cannot upgrade a conclusion");
-      }
+      const state =
+        STATE_RANK[review.state] > STATE_RANK[requirement.state]
+          ? requirement.state
+          : review.state;
       await ctx.db.patch("requirements", requirement._id, {
-        state: review.state,
+        state,
         updatedAt: now,
       });
     }
@@ -659,19 +714,21 @@ export const finishStage = mutation({
       throw new Error("Non-confidential model runs cannot be persisted");
     }
     const now = Date.now();
-    await ctx.db.insert("modelRuns", {
-      userId: user._id,
-      applicationId: args.applicationId,
-      stage: args.stage,
-      model: args.model,
-      confidentialCompute: true,
-      durationMs: args.durationMs,
-      inputTokens: args.inputTokens,
-      outputTokens: args.outputTokens,
-      promptVersion: args.promptVersion,
-      outcome: "success",
-      createdAt: now,
-    });
+    if (stage.readyAt === undefined) {
+      await ctx.db.insert("modelRuns", {
+        userId: user._id,
+        applicationId: args.applicationId,
+        stage: args.stage,
+        model: args.model,
+        confidentialCompute: true,
+        durationMs: args.durationMs,
+        inputTokens: args.inputTokens,
+        outputTokens: args.outputTokens,
+        promptVersion: args.promptVersion,
+        outcome: "success",
+        createdAt: now,
+      });
+    }
     await ctx.db.patch("analysisStages", stage._id, {
       status: "complete",
       completedAt: now,
