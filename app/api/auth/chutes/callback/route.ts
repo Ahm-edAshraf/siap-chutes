@@ -50,17 +50,31 @@ export async function GET(request: NextRequest) {
     return callbackRedirect("invalid_oauth_state");
   }
 
+  let stage = "token_exchange";
   try {
     const tokens = await exchangeCode(code, verifier);
+    stage = "userinfo";
     const user = await fetchChutesUser(tokens.access_token);
+    stage = "session";
     await setChutesSession(tokens, user);
+    stage = "convex_sync";
     const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
     if (!convexUrl) throw new Error("Missing NEXT_PUBLIC_CONVEX_URL");
     const convex = new ConvexHttpClient(convexUrl);
     convex.setAuth(await mintConvexToken(user, "user"));
     await convex.mutation(api.users.sync);
     return callbackRedirect(undefined, returnTo);
-  } catch {
+  } catch (error) {
+    console.error("OAuth callback failed", {
+      stage,
+      error:
+        error instanceof Error
+          ? (error.message.split(/\r?\n/, 1)[0] ?? "Unknown error").slice(
+              0,
+              160,
+            )
+          : "Unknown error",
+    });
     await clearChutesSession();
     return callbackRedirect("authentication_failed");
   }
