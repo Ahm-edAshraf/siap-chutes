@@ -65,12 +65,12 @@ export default async function LandingPage({
               Your workspace
             </Link>
           ) : (
-            <Link
+            <a
               href="/api/auth/chutes/login?returnTo=/app"
               className="bg-siap-ink text-white px-5 py-2.5 rounded"
             >
               Sign in with Chutes
-            </Link>
+            </a>
           )}
         </nav>
       </header>
@@ -98,18 +98,18 @@ export default async function LandingPage({
               checks and an ordered action plan—without retaining raw files.
             </p>
             <div className="flex flex-col sm:flex-row gap-3 mt-8">
-              <Link
+              <a
                 href={primaryHref}
                 className="inline-flex justify-center items-center gap-2 bg-siap-ink text-white px-6 py-3.5 rounded text-lg font-medium"
               >
                 {primaryLabel} <ArrowRight className="w-5 h-5" />
-              </Link>
-              <Link
+              </a>
+              <a
                 href="/sample/Siap%20Demo%20Scholarship%20Pack%202026.pdf"
                 className="inline-flex justify-center items-center border border-siap-ink bg-white px-6 py-3.5 rounded text-lg font-medium"
               >
                 Fictional sample pack
-              </Link>
+              </a>
             </div>
           </div>
           <div className="bg-white border border-siap-ink rounded-lg shadow-xl p-7">
