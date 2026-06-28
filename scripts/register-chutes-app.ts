@@ -7,6 +7,24 @@ const responseSchema = z.object({
   client_secret: z.string().min(1),
 });
 
+const appSchema = z.object({
+  app_id: z.string().min(1),
+  client_id: z.string().min(1),
+  name: z.string().min(1),
+});
+
+const appListSchema = z.object({
+  items: z.array(appSchema),
+});
+
+const updatedAppSchema = appSchema.extend({
+  redirect_uris: z.array(z.string()),
+});
+
+const description =
+  "Privacy-first bureaucracy compiler for Malaysian applications";
+const allowedScopes = ["openid", "profile", "chutes:invoke"];
+
 async function readApiKey() {
   const fromEnvironment = process.env.CHUTES_REGISTRATION_API_KEY?.trim();
   if (fromEnvironment) return fromEnvironment;
@@ -71,26 +89,73 @@ try {
     ),
   ];
   if (!apiKey) throw new Error("A Chutes API key is required");
+  const headers = {
+    authorization: `Bearer ${apiKey}`,
+    "content-type": "application/json",
+  };
+  const payload = {
+    name: "Siap",
+    description,
+    redirect_uris: origins.map(
+      (value) => `${value}/api/auth/chutes/callback`,
+    ),
+    homepage_url: origins.at(-1),
+    allowed_scopes: allowedScopes,
+    public: false,
+  };
   const response = await fetch("https://api.chutes.ai/idp/apps", {
     method: "POST",
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      name: "Siap",
-      description:
-        "Privacy-first bureaucracy compiler for Malaysian applications",
-      redirect_uris: origins.map(
-        (value) => `${value}/api/auth/chutes/callback`,
-      ),
-      homepage_url: origins.at(-1),
-      allowed_scopes: ["openid", "profile", "chutes:invoke"],
-      public: false,
-    }),
+    headers,
+    body: JSON.stringify(payload),
   });
+  if (response.status === 409) {
+    const appsResponse = await fetch(
+      "https://api.chutes.ai/idp/apps?include_public=false&include_shared=false&search=Siap&limit=25",
+      { headers },
+    );
+    if (!appsResponse.ok) {
+      throw new Error(`Existing app lookup failed (${appsResponse.status})`);
+    }
+    const apps = appListSchema.parse(await appsResponse.json()).items;
+    const configuredClientId = process.env.CHUTES_OAUTH_CLIENT_ID?.trim();
+    const matches = configuredClientId
+      ? apps.filter((app) => app.client_id === configuredClientId)
+      : apps.filter((app) => app.name === "Siap");
+    if (matches.length !== 1) {
+      throw new Error(
+        `Registration conflict: expected one existing Siap app, found ${matches.length}`,
+      );
+    }
+    const existing = matches[0];
+    const updateResponse = await fetch(
+      `https://api.chutes.ai/idp/apps/${encodeURIComponent(existing.app_id)}`,
+      {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify(payload),
+      },
+    );
+    if (!updateResponse.ok) {
+      const detail = (await updateResponse.text()).slice(0, 240);
+      throw new Error(
+        `Registration update failed (${updateResponse.status}): ${detail}`,
+      );
+    }
+    const updated = updatedAppSchema.parse(await updateResponse.json());
+    stdout.write(
+      [
+        "",
+        "Registration updated. Existing OAuth credentials remain valid.",
+        `Client ID: ${updated.client_id}`,
+        `Redirect URIs: ${updated.redirect_uris.join(", ")}`,
+        "",
+      ].join("\n"),
+    );
+    process.exit(0);
+  }
   if (!response.ok) {
-    throw new Error(`Registration failed (${response.status})`);
+    const detail = (await response.text()).slice(0, 240);
+    throw new Error(`Registration failed (${response.status}): ${detail}`);
   }
   const credentials = responseSchema.parse(await response.json());
   stdout.write(
