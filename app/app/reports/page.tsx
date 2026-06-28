@@ -8,10 +8,11 @@ import { api } from "@/convex/_generated/api";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useLanguage } from "@/contexts/LanguageContext";
+import { formatDeadline } from "@/lib/date-time";
 import { outcomeLabel, outcomeVariant } from "@/lib/presentation";
 
 export default function ReportsPage() {
-  const { t } = useLanguage();
+  const { lang, t } = useLanguage();
   const applications = useQuery(api.applications.list);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
@@ -96,8 +97,15 @@ export default function ReportsPage() {
                 </h2>
                 <p className="mt-4 text-sm text-siap-ink/65 flex gap-2">
                   <Clock className="w-4 h-4 shrink-0" />
-                  {application.deadline ??
-                    t("Deadline not stated", "Tarikh tutup tidak dinyatakan")}
+                  {application.deadline
+                    ? `${t("Deadline", "Tarikh tutup")}: ${formatDeadline(
+                        application.deadline,
+                        lang,
+                      )}`
+                    : t(
+                        "Deadline not stated",
+                        "Tarikh tutup tidak dinyatakan",
+                      )}
                 </p>
               </div>
               <div className="p-4 bg-siap-gray/5">

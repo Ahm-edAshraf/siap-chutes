@@ -88,6 +88,36 @@ describe("deterministic eligibility", () => {
     expect(resolveRequirementState("confirmed", null, true, false)).toBe(
       "needs_verification",
     );
+    expect(resolveRequirementState("not_met", null, true, true)).toBe(
+      "needs_verification",
+    );
+  });
+
+  test("matches uploaded document filenames after punctuation normalization", () => {
+    expect(
+      evaluateCondition(
+        {
+          kind: "document",
+          mandatory: true,
+          conditionType: "document_present",
+          documentNames: ["current enrolment letter"],
+        },
+        profile,
+        ["D4-current-enrolment-letter.pdf"],
+      ),
+    ).toBe(true);
+    expect(
+      evaluateCondition(
+        {
+          kind: "document",
+          mandatory: true,
+          conditionType: "document_present",
+          documentNames: ["IC copy"],
+        },
+        profile,
+        ["D1-demo-identity-copy.pdf"],
+      ),
+    ).toBe(true);
   });
 
   test("evaluates deadlines against the supplied clock", () => {

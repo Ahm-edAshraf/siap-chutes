@@ -25,6 +25,11 @@ type ProfileLike = {
 };
 
 export type DeterministicResult = true | false | null;
+type RequirementState =
+  | "confirmed"
+  | "needs_verification"
+  | "incomplete"
+  | "not_met";
 
 const MALAYSIA_END_OF_DAY_UTC = "15:59:59.999";
 
@@ -58,7 +63,36 @@ export function ageOnDate(dateOfBirth: string, comparisonDate: string) {
 }
 
 function normalized(value: string) {
-  return value.normalize("NFKC").trim().toLocaleLowerCase("en");
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase("en")
+    .replace(/\.[a-z0-9]{2,5}$/i, "")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+const DOCUMENT_ALIASES = [
+  ["identity", "identity card", "ic copy", "mykad"],
+  ["academic transcript", "transcript"],
+  ["household income", "income statement", "income evidence"],
+  ["enrolment", "enrollment"],
+  ["referee letter", "reference letter"],
+] as const;
+
+function documentNamesMatch(wanted: string, actual: string) {
+  const normalizedWanted = normalized(wanted);
+  const normalizedActual = normalized(actual);
+  if (
+    normalizedActual.includes(normalizedWanted) ||
+    normalizedWanted.includes(normalizedActual)
+  ) {
+    return true;
+  }
+  return DOCUMENT_ALIASES.some(
+    (aliases) =>
+      aliases.some((alias) => normalizedWanted.includes(alias)) &&
+      aliases.some((alias) => normalizedActual.includes(alias)),
+  );
 }
 
 function availableProfileDocuments(profile: ProfileLike) {
@@ -105,11 +139,7 @@ export function evaluateCondition(
         ...availableProfileDocuments(profile),
       ].map(normalized);
       return requirement.documentNames.some((wanted) =>
-        present.some(
-          (actual) =>
-            actual.includes(normalized(wanted)) ||
-            normalized(wanted).includes(actual),
-        ),
+        present.some((actual) => documentNamesMatch(wanted, actual)),
       );
     }
     case "deadline_after":
@@ -137,17 +167,15 @@ export function evaluateCondition(
 }
 
 export function resolveRequirementState(
-  proposed: "confirmed" | "needs_verification" | "incomplete" | "not_met",
+  _proposed: "confirmed" | "needs_verification" | "incomplete" | "not_met",
   deterministic: DeterministicResult,
   mandatory: boolean,
   citationVerified: boolean,
   definiteFailure = true,
-) {
+): RequirementState {
   if (deterministic === false) {
     return mandatory && definiteFailure ? "not_met" : "incomplete";
   }
   if (deterministic === true && citationVerified) return "confirmed";
-  if (proposed === "confirmed" && !citationVerified)
-    return "needs_verification";
-  return proposed;
+  return "needs_verification";
 }

@@ -8,6 +8,7 @@ import type { Id } from "@/convex/_generated/dataModel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useToast } from "@/components/ToastProvider";
 import { useLanguage } from "@/contexts/LanguageContext";
+import { formatMalaysiaTimestamp } from "@/lib/date-time";
 
 const statusLabels = {
   ready: ["Ready", "Sedia"],
@@ -17,7 +18,7 @@ const statusLabels = {
 } as const;
 
 export default function DocumentsPage() {
-  const { t } = useLanguage();
+  const { lang, t } = useLanguage();
   const { toast } = useToast();
   const documents = useQuery(api.inventory.list);
   const upsert = useMutation(api.inventory.upsert);
@@ -122,7 +123,8 @@ export default function DocumentsPage() {
               {document.lastUpdatedAt ? (
                 <p className="text-xs text-siap-ink/55 mt-1 flex gap-1">
                   <Clock className="w-3 h-3" />
-                  {new Date(document.lastUpdatedAt).toLocaleDateString()}
+                  {t("Updated", "Dikemas kini")}:{" "}
+                  {formatMalaysiaTimestamp(document.lastUpdatedAt, lang)}
                 </p>
               ) : null}
             </div>

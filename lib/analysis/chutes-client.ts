@@ -235,7 +235,7 @@ async function createCompletion<T>(
             schema: jsonSchema,
           },
         },
-        temperature: 0.1,
+        temperature: 0,
         max_tokens: options.maxTokens ?? 8_000,
       }),
     },

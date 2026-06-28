@@ -22,6 +22,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useToast } from "@/components/ToastProvider";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
+import { formatCalendarDate, formatDeadline } from "@/lib/date-time";
 import {
   outcomeLabel,
   outcomeVariant,
@@ -86,7 +87,7 @@ export default function ReportDetailPage() {
   const params = useParams<{ id: string }>();
   const id = params.id as Id<"applications">;
   const router = useRouter();
-  const { t } = useLanguage();
+  const { lang, t } = useLanguage();
   const { toast } = useToast();
   const rawBundle = useQuery(api.applications.get, { id });
   const setCompleted = useMutation(api.actions.setCompleted);
@@ -234,7 +235,9 @@ export default function ReportDetailPage() {
           <div className="flex flex-wrap gap-3 mt-3 items-center text-sm text-siap-ink/70">
             <span>
               {t("Deadline", "Tarikh tutup")}:{" "}
-              {application.deadline ?? t("Not stated", "Tidak dinyatakan")}
+              {application.deadline
+                ? formatDeadline(application.deadline, lang)
+                : t("Not stated", "Tidak dinyatakan")}
             </span>
             <StatusBadge
               label={outcomeLabel(application.outcome)}
@@ -325,7 +328,8 @@ export default function ReportDetailPage() {
                 />
                 <h3 className="font-medium mt-3">{document.name}</h3>
                 <p className="text-sm text-siap-ink/60 mt-1">
-                  {document.owner} · {document.suggestedDate}
+                  {document.owner} · {t("Target", "Sasaran")}:{" "}
+                  {formatCalendarDate(document.suggestedDate, lang)}
                 </p>
                 {document.action.toLowerCase().includes("email") &&
                 emailAction ? (

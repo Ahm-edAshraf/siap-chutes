@@ -1,6 +1,6 @@
 import type { ExtractedDocument, StageName } from "./schemas";
 
-export const PROMPT_VERSION = "siap-2026-06-27";
+export const PROMPT_VERSION = "siap-2026-06-28-deterministic";
 
 function renderDocuments(documents: ExtractedDocument[]) {
   return documents
@@ -18,7 +18,7 @@ function renderDocuments(documents: ExtractedDocument[]) {
 
 const TASKS: Record<StageName, string> = {
   requirement_compiler:
-    "Compile programme metadata and every explicit eligibility rule in source order. Assign keys req_001, req_002, and so on in that exact order. Include a weight, mandatory flag, machine-readable condition when possible, and an exact source quote.",
+    "Compile programme metadata and every explicit eligibility rule in source order. Assign keys req_001, req_002, and so on in that exact order. Include a weight, mandatory flag, machine-readable condition whenever the rule matches a supported condition type, and an exact source quote. Return deadlines as ISO 8601; use +08:00 for explicitly stated Malaysia local times.",
   eligibility_mapper:
     "Independently enumerate every explicit eligibility rule in source order using keys req_001, req_002, and so on, copy a concise requirement label, then map the supplied profile and evidence to each rule. Distinguish missing evidence from a definite rule violation. Never confirm without an exact source citation.",
   red_team_reviewer:

@@ -17,10 +17,12 @@ import { validateActionDag } from "@/lib/analysis/dag";
 import { assertExactRequirementCoverage } from "@/lib/analysis/coverage";
 import { validateExtractedDocuments } from "@/lib/analysis/limits";
 import {
-  clampReviewerStates,
-  reconcileOptionalRequirementKeys,
   reconcileRequirementCoverage,
 } from "@/lib/analysis/reconcile";
+import {
+  buildStablePlan,
+  canonicalizeCompilerOutput,
+} from "@/lib/analysis/stable-output";
 import {
   buildPrompt,
   OUTPUT_FORMATS,
@@ -99,10 +101,20 @@ async function applyStageOutput(
       profile: Parameters<typeof evaluateCondition>[1];
       requirements: Array<
         Parameters<typeof evaluateCondition>[0] & {
+          _id: string;
           key: string;
           mandatory: boolean;
         }
       >;
+      evidence: Array<{
+        requirementId: string;
+        documentName: string;
+        pageNumber?: number;
+        excerpt: string;
+        confidence: "high" | "medium" | "low";
+        citationVerified: boolean;
+        matchKind: "document" | "profile" | "deterministic" | "none";
+      }>;
     };
     const byKey = new Map(
       typedContext.requirements.map((requirement) => [
@@ -123,16 +135,33 @@ async function applyStageOutput(
         if (!requirement) {
           throw new Error(`Unknown requirement key: ${mapping.requirementKey}`);
         }
-        const citation = verifiedCitation(documents, mapping.citation);
+        const mapperCitation = verifiedCitation(documents, mapping.citation);
         const deterministicResult = evaluateCondition(
           requirement,
           typedContext.profile,
           availableDocumentNames,
         );
+        const compilerCitation = typedContext.evidence.find(
+          (evidence) =>
+            evidence.requirementId === requirement._id &&
+            evidence.citationVerified,
+        );
         const groundedCitation =
           deterministicResult === null
-            ? citation
-            : { ...citation, matchKind: "deterministic" as const };
+            ? mapperCitation
+            : compilerCitation
+              ? {
+                  documentName: compilerCitation.documentName,
+                  pageNumber: compilerCitation.pageNumber,
+                  excerpt: compilerCitation.excerpt,
+                  confidence: compilerCitation.confidence,
+                  verified: true,
+                  matchKind: "deterministic" as const,
+                }
+              : {
+                  ...mapperCitation,
+                  matchKind: "deterministic" as const,
+                };
         return {
           requirementKey: mapping.requirementKey,
           state: resolveRequirementState(
@@ -358,7 +387,9 @@ export async function POST(
       throw new Error("ANALYSIS_STAGE_FAILED");
     }
 
-    const compilerOutput = compiler.result.data as CompilerOutput;
+    const compilerOutput = canonicalizeCompilerOutput(
+      compiler.result.data as CompilerOutput,
+    );
     await refreshConvexAuth();
     await applyStageOutput(
       convex,
@@ -442,10 +473,16 @@ export async function POST(
           "The independent reviewer did not return a matching conclusion.",
       }),
     );
-    reviewerOutput.reviews = clampReviewerStates(
-      mappedContext.requirements,
-      reviewerOutput.reviews,
+    const mappedState = new Map(
+      mappedContext.requirements.map((requirement) => [
+        requirement.key,
+        requirement.state,
+      ]),
     );
+    reviewerOutput.reviews = reviewerOutput.reviews.map((review) => ({
+      ...review,
+      state: mappedState.get(review.requirementKey) ?? "needs_verification",
+    }));
     await applyStageOutput(
       convex,
       applicationId,
@@ -467,10 +504,12 @@ export async function POST(
       promptVersion: PROMPT_VERSION,
     });
 
-    const plannerOutput = planner.result.data as PlannerOutput;
-    plannerOutput.missingDocuments = reconcileOptionalRequirementKeys(
-      canonicalRequirements,
-      plannerOutput.missingDocuments,
+    const reviewedContext = await convex.query(api.analysis.getContext, {
+      applicationId,
+    });
+    const plannerOutput = buildStablePlan(
+      reviewedContext.requirements,
+      reviewedContext.application.deadline,
     );
     await applyStageOutput(
       convex,
@@ -478,7 +517,7 @@ export async function POST(
       "action_planner",
       planner.run,
       plannerOutput,
-      mappedContext,
+      reviewedContext,
       requestData.documents,
     );
     await convex.mutation(api.analysis.finishStage, {

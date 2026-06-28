@@ -13,10 +13,11 @@ import { api } from "@/convex/_generated/api";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useLanguage } from "@/contexts/LanguageContext";
+import { formatDeadline } from "@/lib/date-time";
 import { outcomeLabel, outcomeVariant } from "@/lib/presentation";
 
 export default function OverviewDashboard() {
-  const { t } = useLanguage();
+  const { lang, t } = useLanguage();
   const profile = useQuery(api.profiles.get);
   const applications = useQuery(api.applications.list);
   if (applications === undefined) {
@@ -118,7 +119,8 @@ export default function OverviewDashboard() {
                     {application.deadline ? (
                       <>
                         <Clock className="w-4 h-4" />
-                        {application.deadline}
+                        {t("Deadline", "Tarikh tutup")}:{" "}
+                        {formatDeadline(application.deadline, lang)}
                       </>
                     ) : (
                       <>
