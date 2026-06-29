@@ -1,6 +1,6 @@
 import type { ExtractedDocument, StageName } from "./schemas";
 
-export const PROMPT_VERSION = "siap-2026-06-28-evidence-claims";
+export const PROMPT_VERSION = "siap-2026-06-29-hot-stages-v2";
 
 function renderDocuments(documents: ExtractedDocument[]) {
   return documents
@@ -18,7 +18,7 @@ function renderDocuments(documents: ExtractedDocument[]) {
 
 const TASKS: Record<StageName, string> = {
   requirement_compiler:
-    "Compile programme metadata, every explicit eligibility rule, and every required-document submission rule from the programme_rules document only, in source order. Required documents must be separate requirements after the eligibility rules when that is their source order. Never invent requirements from supporting_evidence documents. Assign keys req_001, req_002, and so on in that exact order. Include a weight, mandatory flag, machine-readable condition whenever the rule matches a supported condition type, and an exact source quote. Return deadlines as ISO 8601; use +08:00 for explicitly stated Malaysia local times.",
+    "Compile programme metadata, every explicit eligibility rule, and every required-document submission rule from the programme_rules document only, in source order. Store the submission deadline only in programme.deadline; never emit it as a requirement. Required documents must be separate requirements after the eligibility rules when that is their source order. Never invent requirements from supporting_evidence documents. Assign keys req_001, req_002, and so on in that exact order. Include a weight, mandatory flag, machine-readable condition whenever the rule matches a supported condition type, and an exact source quote. Return deadlines as ISO 8601; use +08:00 for explicitly stated Malaysia local times.",
   eligibility_mapper:
     "Independently enumerate every explicit eligibility rule from programme_rules in source order using keys req_001, req_002, and so on, then map the supplied profile and supporting_evidence to each eligibility rule. The programme_rules text states what is required and is never proof that the applicant satisfies it. Distinguish missing evidence from a definite violation. Include a typed claim only when the conclusion depends on a fact that is not already a structured profile field; do not repeat citizenship, date of birth, study level, or household income as claims. A claim's verbatimValue must appear exactly inside its citation quote. Set subject to the documented person's exact name when present; never replace a visible name with the generic word Applicant. Omit claim when there is no applicant evidence.",
   red_team_reviewer:
@@ -51,6 +51,7 @@ export function buildPrompt(
     `Required JSON shape: ${OUTPUT_FORMATS[stage]}`,
     `<untrusted_context>\n${JSON.stringify(context)}\n</untrusted_context>`,
     `<untrusted_documents>\n${renderDocuments(documents)}\n</untrusted_documents>`,
+    "Do not emit hidden reasoning. Produce the requested JSON directly. /no_think",
   ].join("\n\n");
 }
 

@@ -23,6 +23,7 @@ export const extractedDocumentSchema = z.object({
 
 export const stageRequestSchema = z.object({
   documents: z.array(extractedDocumentSchema).min(1).max(6),
+  deadlineAt: z.number().int().positive().optional(),
 });
 
 export type ExtractedDocument = z.infer<typeof extractedDocumentSchema>;

@@ -99,6 +99,17 @@ export function claimMatchesSubject(
   );
 }
 
+export function evidencePageMatchesSubject(
+  expectedSubject: string,
+  citedPageText = "",
+) {
+  const expected = normalizedSemantic(expectedSubject);
+  return (
+    expected.length >= 4 &&
+    normalizedSemantic(citedPageText).includes(expected)
+  );
+}
+
 function compareNumeric(
   value: number,
   threshold: number,
@@ -150,15 +161,38 @@ export function evaluateEvidenceClaim(
   return null;
 }
 
+export function evaluateNumericCitation(
+  requirement: RequirementLike,
+  citationQuote: string,
+): true | false | null {
+  if (
+    requirement.threshold === undefined ||
+    (requirement.kind !== "numeric" &&
+      requirement.conditionType !== "numeric")
+  ) {
+    return null;
+  }
+  const comparisons = numericValues(citationQuote)
+    .map((value) =>
+      compareNumeric(value, requirement.threshold!, requirement.operator),
+    )
+    .filter((value): value is boolean => value !== null);
+  if (comparisons.length === 0) return null;
+  return comparisons.every((value) => value === comparisons[0])
+    ? comparisons[0]
+    : null;
+}
+
 export function resolveEvidenceConsensus({
   requirement,
   mapping,
-  review,
   profileResult,
   citationVerified,
   citationIsSupporting,
   expectedSubject,
   citedPageText,
+  claimValidated,
+  citationSubjectValidated,
 }: {
   requirement: RequirementLike;
   mapping: Mapping;
@@ -168,6 +202,8 @@ export function resolveEvidenceConsensus({
   citationIsSupporting: boolean;
   expectedSubject?: string;
   citedPageText?: string;
+  claimValidated?: boolean;
+  citationSubjectValidated?: boolean;
 }): EvidenceResolution {
   if (profileResult === false) {
     return {
@@ -190,15 +226,41 @@ export function resolveEvidenceConsensus({
   }
 
   const claimGrounded =
-    mapping.claim !== undefined &&
-    isEvidenceClaimGrounded(mapping.claim, mapping.citation.quote);
+    claimValidated ??
+    (mapping.claim !== undefined &&
+      isEvidenceClaimGrounded(mapping.claim, mapping.citation.quote));
   const groundedSupportingClaim =
     citationVerified &&
     citationIsSupporting &&
     claimGrounded &&
-    (expectedSubject === undefined ||
+    (claimValidated !== undefined ||
+      expectedSubject === undefined ||
       claimMatchesSubject(mapping.claim!, expectedSubject, citedPageText));
   if (!groundedSupportingClaim) {
+    const numericResult =
+      citationVerified &&
+      citationIsSupporting &&
+      citationSubjectValidated
+        ? evaluateNumericCitation(requirement, mapping.citation.quote)
+        : null;
+    const mappingAgrees =
+      numericResult === true
+        ? mapping.proposedState === "confirmed"
+        : numericResult === false
+          ? mapping.proposedState === "not_met" ||
+            mapping.proposedState === "incomplete"
+          : false;
+    if (numericResult !== null && mappingAgrees) {
+      return {
+        state: numericResult
+          ? "confirmed"
+          : requirement.mandatory
+            ? "not_met"
+            : "incomplete",
+        deterministicResult: numericResult,
+        usedSupportingEvidence: true,
+      };
+    }
     return {
       state: "needs_verification",
       deterministicResult: undefined,
@@ -216,17 +278,6 @@ export function resolveEvidenceConsensus({
           : "incomplete",
       deterministicResult: claimResult,
       usedSupportingEvidence: true,
-    };
-  }
-
-  const consensus =
-    review?.evidenceVerdict === "supports_mapping" &&
-    review.state === mapping.proposedState;
-  if (!consensus) {
-    return {
-      state: "needs_verification",
-      deterministicResult: undefined,
-      usedSupportingEvidence: false,
     };
   }
 

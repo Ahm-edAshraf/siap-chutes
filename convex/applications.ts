@@ -54,7 +54,7 @@ export const create = mutation({
       evidenceScore: 0,
       actionScore: 0,
       analysisGeneration: 1,
-      promptVersion: "siap-2026-06-27",
+      promptVersion: "siap-2026-06-29-bounded-stages",
       createdAt: now,
       updatedAt: now,
     });
@@ -157,7 +157,7 @@ export const get = query({
         ...action,
         dependencies: dependencyIds.get(action._id) ?? [],
       })),
-      modelRuns,
+      modelRuns: modelRuns.filter((run) => run.outcome === "success"),
     };
   },
 });

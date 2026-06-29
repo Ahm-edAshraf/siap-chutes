@@ -1,59 +1,30 @@
 import { ConvexHttpClient } from "convex/browser";
 import { NextResponse } from "next/server";
-import type { ZodType } from "zod";
+import { z } from "zod";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import {
-  runStructuredStage,
-  selectDistinctTeeModels,
-} from "@/lib/analysis/chutes-client";
-import {
-  normalizeEvidence,
-  verifiedCitation,
-} from "@/lib/analysis/citations";
-import { runConcurrently } from "@/lib/analysis/concurrency";
 import { evaluateCondition } from "@/lib/analysis/deterministic";
-import { validateActionDag } from "@/lib/analysis/dag";
-import {
-  isSupportingDocument,
-  resolveEvidenceConsensus,
-} from "@/lib/analysis/evidence-claims";
-import { assertExactRequirementCoverage } from "@/lib/analysis/coverage";
-import { validateExtractedDocuments } from "@/lib/analysis/limits";
+import { resolveEvidenceConsensus } from "@/lib/analysis/evidence-claims";
 import {
   reconcileRequirementCoverage,
 } from "@/lib/analysis/reconcile";
-import {
-  buildStablePlan,
-  canonicalizeCompilerOutput,
-} from "@/lib/analysis/stable-output";
-import {
-  buildPrompt,
-  OUTPUT_FORMATS,
-  PROMPT_VERSION,
-} from "@/lib/analysis/prompt";
-import {
-  outputSchemas,
-  stageRequestSchema,
-  type CompilerOutput,
-  type MapperOutput,
-  type PlannerAgentOutput,
-  type PlannerOutput,
-  type ReviewerOutput,
-  type StageName,
+import { buildStablePlan } from "@/lib/analysis/stable-output";
+import type {
+  MapperOutput,
+  ReviewerOutput,
+  StageName,
 } from "@/lib/analysis/schemas";
+import { validateActionDag } from "@/lib/analysis/dag";
+import { PROMPT_VERSION } from "@/lib/analysis/prompt";
 import { mintConvexToken } from "@/lib/auth/jwt";
 import { hasValidOrigin } from "@/lib/auth/origin";
 import { getValidChutesSession } from "@/lib/auth/session";
 
-export const maxDuration = 300;
+export const maxDuration = 30;
 
-const MAX_TOKENS: Record<StageName, number> = {
-  requirement_compiler: 3_000,
-  eligibility_mapper: 6_000,
-  red_team_reviewer: 6_000,
-  action_planner: 1_500,
-};
+const finalizeRequest = z.object({
+  documentNames: z.array(z.string().min(1).max(255)).min(1).max(6),
+});
 
 function required(name: string): string {
   const value = process.env[name]?.trim();
@@ -61,544 +32,430 @@ function required(name: string): string {
   return value;
 }
 
-function errorCode(error: unknown) {
-  const message = error instanceof Error ? error.message : "";
-  const allowed = [
-    "CHUTES_AUTH_REQUIRED",
-    "NO_APPROVED_TEE_MODEL",
-    "MALFORMED_MODEL_OUTPUT",
-    "INCOMPLETE_REQUIREMENT_COVERAGE",
-    "CHUTES_STAGE_TIMEOUT",
-  ];
-  if (allowed.includes(message)) return message;
-  if (message.startsWith("CHUTES_MODEL_CATALOG_")) return message;
-  if (message.startsWith("CHUTES_COMPLETION_")) return message;
-  if (message.includes("cycle")) return "INVALID_ACTION_DEPENDENCIES";
-  return "ANALYSIS_STAGE_FAILED";
+type Progress = {
+  application: {
+    state:
+      | "draft"
+      | "reading_requirements"
+      | "checking_eligibility"
+      | "challenging_assumptions"
+      | "building_plan"
+      | "complete"
+      | "failed";
+  };
+  stages: Array<{
+    stage: StageName;
+    status: "pending" | "running" | "complete" | "failed";
+    generation?: number;
+    attempt: number;
+    readyAt?: number;
+    errorCode?: string;
+  }>;
+  modelRuns: Array<{
+    stage: StageName;
+    model: string;
+    confidentialCompute: boolean;
+    durationMs: number;
+    inputTokens?: number;
+    outputTokens?: number;
+    promptVersion: string;
+    outcome: "success" | "failed";
+    generation?: number;
+    attempt?: number;
+  }>;
+};
+
+function runIdentity(progress: Progress, stageName: StageName) {
+  const stage = progress.stages.find((candidate) => candidate.stage === stageName);
+  if (!stage) throw new Error("ANALYSIS_STAGES_INCOMPLETE");
+  return {
+    stage,
+    run: {
+      generation: stage.generation ?? 0,
+      attempt: stage.attempt,
+    },
+  };
 }
 
-async function applyStageOutput(
+function successfulModelRun(progress: Progress, stageName: StageName) {
+  const { stage, run } = runIdentity(progress, stageName);
+  const modelRun = [...progress.modelRuns]
+    .reverse()
+    .find(
+      (candidate) =>
+        candidate.stage === stageName &&
+        candidate.outcome === "success" &&
+        (candidate.generation === undefined ||
+          candidate.generation === run.generation) &&
+        (candidate.attempt === undefined ||
+          candidate.attempt === run.attempt),
+    );
+  if (!modelRun || stage.readyAt === undefined) {
+    throw new Error("ANALYSIS_STAGE_RESULT_MISSING");
+  }
+  return { stage, run, modelRun };
+}
+
+async function finishReadyStage(
   convex: ConvexHttpClient,
   applicationId: Id<"applications">,
-  stage: StageName,
-  run: { generation: number; attempt: number },
-  output: CompilerOutput | MapperOutput | ReviewerOutput | PlannerOutput,
-  context: Awaited<ReturnType<ConvexHttpClient["query"]>>,
-  documents: ReturnType<typeof stageRequestSchema.parse>["documents"],
-  reviews: ReviewerOutput["reviews"] = [],
+  progress: Progress,
+  stageName: StageName,
 ) {
-  if (stage === "requirement_compiler") {
-    const value = output as CompilerOutput;
-    await convex.mutation(api.analysis.applyRequirementCompiler, {
-      applicationId,
-      ...run,
-      programme: value.programme,
-      requirements: value.requirements.map((requirement) => ({
-        ...requirement,
-        citation: verifiedCitation(documents, requirement.citation),
-      })),
-    });
-    return;
-  }
-
-  if (stage === "eligibility_mapper") {
-    const value = output as MapperOutput;
-    const typedContext = context as {
-      application: { sourceFileName: string };
-      profile: Parameters<typeof evaluateCondition>[1] & { name: string };
-      requirements: Array<
-        Parameters<typeof evaluateCondition>[0] & {
-          _id: string;
-          key: string;
-          label: string;
-          description?: string;
-          mandatory: boolean;
-        }
-      >;
-      evidence: Array<{
-        requirementId: string;
-        documentName: string;
-        pageNumber?: number;
-        excerpt: string;
-        confidence: "high" | "medium" | "low";
-        citationVerified: boolean;
-        matchKind: "document" | "profile" | "deterministic" | "none";
-      }>;
-    };
-    const byKey = new Map(
-      typedContext.requirements.map((requirement) => [
-        requirement.key,
-        requirement,
-      ]),
-    );
-    const reviewByKey = new Map(
-      reviews.map((review) => [review.requirementKey, review]),
-    );
-    assertExactRequirementCoverage(
-      typedContext.requirements.map((requirement) => requirement.key),
-      value.mappings.map((mapping) => mapping.requirementKey),
-    );
-    const availableDocumentNames = documents.map((document) => document.name);
-    await convex.mutation(api.analysis.applyEligibilityMapper, {
-      applicationId,
-      ...run,
-      mappings: value.mappings.map((mapping) => {
-        const requirement = byKey.get(mapping.requirementKey);
-        if (!requirement) {
-          throw new Error(`Unknown requirement key: ${mapping.requirementKey}`);
-        }
-        const mapperCitation = verifiedCitation(documents, mapping.citation);
-        const profileResult = evaluateCondition(
-          requirement,
-          typedContext.profile,
-          availableDocumentNames,
-        );
-        const compilerCitation = typedContext.evidence.find(
-          (evidence) =>
-            evidence.requirementId === requirement._id &&
-            evidence.citationVerified,
-        );
-        const citedDocument = documents.find(
-          (document) =>
-            normalizeEvidence(document.name) ===
-            normalizeEvidence(mapping.citation.documentName),
-        );
-        const citedPageText =
-          mapping.citation.pageNumber === undefined
-            ? citedDocument?.pages.map((page) => page.text).join("\n")
-            : citedDocument?.pages.find(
-                (page) => page.pageNumber === mapping.citation.pageNumber,
-              )?.text;
-        const resolution = resolveEvidenceConsensus({
-          requirement,
-          mapping,
-          review: reviewByKey.get(mapping.requirementKey),
-          profileResult,
-          citationVerified:
-            profileResult === null
-              ? mapperCitation.verified
-              : (compilerCitation?.citationVerified ??
-                mapperCitation.verified),
-          citationIsSupporting: isSupportingDocument(
-            typedContext.application.sourceFileName,
-            mapping.citation.documentName,
-          ),
-          expectedSubject: typedContext.profile.name,
-          citedPageText,
-        });
-        const groundedCitation =
-          resolution.usedSupportingEvidence || profileResult === null
-            ? mapperCitation
-            : compilerCitation
-              ? {
-                  documentName: compilerCitation.documentName,
-                  pageNumber: compilerCitation.pageNumber,
-                  excerpt: compilerCitation.excerpt,
-                  confidence: compilerCitation.confidence,
-                  verified: true,
-                  matchKind: "deterministic" as const,
-                }
-              : {
-                  ...mapperCitation,
-                  matchKind: "deterministic" as const,
-                };
-        return {
-          requirementKey: mapping.requirementKey,
-          state: resolution.state,
-          deterministicResult: resolution.deterministicResult,
-          citation: groundedCitation,
-        };
-      }),
-    });
-    return;
-  }
-
-  if (stage === "red_team_reviewer") {
-    const value = output as ReviewerOutput;
-    const typedContext = context as {
-      requirements: Array<{ key: string }>;
-    };
-    assertExactRequirementCoverage(
-      typedContext.requirements.map((requirement) => requirement.key),
-      value.reviews.map((review) => review.requirementKey),
-    );
-    await convex.mutation(api.analysis.applyRedTeamReviewer, {
-      applicationId,
-      ...run,
-      reviews: value.reviews.map(({ requirementKey, state, reason }) => ({
-        requirementKey,
-        state,
-        reason,
-      })),
-    });
-    return;
-  }
-
-  const value = output as PlannerOutput;
-  validateActionDag(value.actions);
-  await convex.mutation(api.analysis.applyActionPlanner, {
+  const { run, modelRun } = successfulModelRun(progress, stageName);
+  await convex.mutation(api.analysis.finishStage, {
     applicationId,
+    stage: stageName,
     ...run,
-    missingDocuments: value.missingDocuments,
-    actions: value.actions,
+    model: modelRun.model,
+    confidentialCompute: modelRun.confidentialCompute,
+    durationMs: modelRun.durationMs,
+    inputTokens: modelRun.inputTokens,
+    outputTokens: modelRun.outputTokens,
+    promptVersion: modelRun.promptVersion,
   });
 }
 
 export async function POST(
   request: Request,
-  context: {
-    params: Promise<{ id: string }>;
-  },
+  context: { params: Promise<{ id: string }> },
 ) {
   if (!hasValidOrigin(request)) {
     return NextResponse.json({ error: "Invalid origin" }, { status: 403 });
   }
-  let session = await getValidChutesSession();
+  const session = await getValidChutesSession();
   if (!session) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
-  const params = await context.params;
-
-  let requestData: ReturnType<typeof stageRequestSchema.parse>;
+  let requestData: z.infer<typeof finalizeRequest>;
   try {
-    requestData = stageRequestSchema.parse(await request.json());
-    validateExtractedDocuments(requestData.documents);
+    requestData = finalizeRequest.parse(await request.json());
   } catch {
     return NextResponse.json(
-      { error: "Invalid or oversized document payload" },
+      { error: "Invalid finalization payload" },
       { status: 400 },
     );
   }
 
-  const applicationId = params.id as Id<"applications">;
+  const { id } = await context.params;
+  const applicationId = id as Id<"applications">;
   const convex = new ConvexHttpClient(required("NEXT_PUBLIC_CONVEX_URL"));
-  const serviceUser = session.user;
-  const refreshConvexAuth = async () => {
-    convex.setAuth(await mintConvexToken(serviceUser, "analysis_service"));
-  };
-  await refreshConvexAuth();
-  const ensembleStartedAt = Date.now();
-  let began = false;
+  convex.setAuth(await mintConvexToken(session.user, "analysis_service"));
+  const finalizationStartedAt = Date.now();
 
   try {
-    const begin = await convex.mutation(api.analysis.beginEnsemble, {
-      applicationId,
-    });
-    if (begin.status === "already_complete") {
-      return NextResponse.json({ ok: true, idempotent: true });
+    let progress = (await convex.query(api.applications.getProgress, {
+      id: applicationId,
+    })) as Progress | null;
+    if (!progress) {
+      return NextResponse.json({ error: "Application not found" }, { status: 404 });
     }
-    if (begin.status === "already_running") {
+    if (progress.application.state === "complete") {
+      return NextResponse.json({ ok: true, idempotent: true, durationMs: 0 });
+    }
+
+    for (const requiredStage of [
+      "requirement_compiler",
+      "eligibility_mapper",
+    ] as const) {
+      const { stage } = runIdentity(progress, requiredStage);
+      if (stage.readyAt !== undefined || stage.status === "complete") continue;
+      if (stage.status === "running") {
+        return NextResponse.json(
+          { error: "ANALYSIS_STAGES_RUNNING", stage: requiredStage },
+          { status: 409 },
+        );
+      }
+      await convex.mutation(api.analysis.failAnalysis, {
+        applicationId,
+        stage: requiredStage,
+        errorCode: stage.errorCode ?? "REQUIRED_STAGE_FAILED",
+      });
       return NextResponse.json(
-        { ok: true, idempotent: true, running: true },
-        { status: 202 },
+        { error: stage.errorCode ?? "REQUIRED_STAGE_FAILED", stage: requiredStage },
+        { status: 502 },
       );
     }
-    began = true;
-    const runs = new Map(
-      begin.runs.map((run) => [
-        run.stage,
-        { generation: begin.generation, attempt: run.attempt },
-      ]),
-    );
-    const analysisContext = await convex.query(api.analysis.getContext, {
+
+    const initialContext = await convex.query(api.analysis.getContext, {
       applicationId,
     });
-    let refreshPromise: ReturnType<typeof getValidChutesSession> | undefined;
-    const getAccessToken = async (forceRefresh: boolean) => {
-      if (forceRefresh) {
-        refreshPromise ??= getValidChutesSession(true).finally(() => {
-          refreshPromise = undefined;
-        });
-        session = await refreshPromise;
-      }
-      return session?.accessToken ?? null;
-    };
-    const primaryModel =
-      process.env.CHUTES_PRIMARY_MODEL ?? "google/gemma-4-31B-turbo-TEE";
-    const chutesOptions = { deadlineAt: Date.now() + 270_000 };
-    const models = await selectDistinctTeeModels(
-      [
-        { key: "requirement_compiler", requestedModel: primaryModel },
-        {
-          key: "eligibility_mapper",
-          requestedModel:
-            process.env.CHUTES_MAPPER_MODEL ?? "MiniMaxAI/MiniMax-M2.5-TEE",
-        },
-        {
-          key: "red_team_reviewer",
-          requestedModel:
-            process.env.CHUTES_REVIEW_MODEL ?? "deepseek-ai/DeepSeek-V3.2-TEE",
-        },
-        {
-          key: "action_planner",
-          requestedModel:
-            process.env.CHUTES_PLANNER_MODEL ?? "zai-org/GLM-5-TEE",
-        },
-      ] as const,
-      getAccessToken,
-      chutesOptions,
-    );
-    const promptContext = {
-      application: analysisContext.application,
-      profile: analysisContext.profile,
-    };
-    type StageOutputByName = {
-      requirement_compiler: CompilerOutput;
-      eligibility_mapper: MapperOutput;
-      red_team_reviewer: ReviewerOutput;
-      action_planner: PlannerAgentOutput;
-    };
-    const runAgent = async <T extends StageName>(stage: T) => {
-      const run = runs.get(stage);
-      if (!run) throw new Error("STALE_ANALYSIS_RUN");
-      const startedAt = Date.now();
-      try {
-        const stageDocuments =
-          stage === "action_planner"
-            ? requestData.documents.slice(0, 1)
-            : requestData.documents;
-        const result = await runStructuredStage<StageOutputByName[T]>(
-          models[stage],
-          buildPrompt(stage, stageDocuments, promptContext),
-          outputSchemas[stage] as unknown as ZodType<StageOutputByName[T]>,
-          OUTPUT_FORMATS[stage],
-          getAccessToken,
-          { ...chutesOptions, maxTokens: MAX_TOKENS[stage] },
-        );
-        const durationMs = Date.now() - startedAt;
-        await convex.mutation(api.analysis.markAgentReady, {
-          applicationId,
-          stage,
-          ...run,
-          model: models[stage],
-          confidentialCompute: true,
-          durationMs,
-          inputTokens: result.usage.inputTokens,
-          outputTokens: result.usage.outputTokens,
-          promptVersion: PROMPT_VERSION,
-        });
-        return {
-          ok: true as const,
-          stage,
-          run,
-          model: models[stage],
-          durationMs,
-          result,
-        };
-      } catch (error) {
-        return {
-          ok: false as const,
-          stage,
-          run,
-          model: models[stage],
-          durationMs: Date.now() - startedAt,
-          error,
-        };
-      }
-    };
-    const [compiler, mapper, reviewer, planner] = await runConcurrently([
-      () => runAgent("requirement_compiler"),
-      () => runAgent("eligibility_mapper"),
-      () => runAgent("red_team_reviewer"),
-      () => runAgent("action_planner"),
-    ]);
-    const settled = [compiler, mapper, reviewer, planner];
-    const failed = settled.find((result) => !result.ok);
-    if (failed) {
-      const code = errorCode(failed.error);
-      await refreshConvexAuth();
-      await convex.mutation(api.analysis.failStage, {
+    if (initialContext.requirements.length === 0) {
+      throw new Error("INCOMPLETE_REQUIREMENT_COVERAGE");
+    }
+
+    const compiler = runIdentity(progress, "requirement_compiler");
+    if (compiler.stage.status !== "complete") {
+      await finishReadyStage(
+        convex,
         applicationId,
-        stage: failed.stage,
-        ...failed.run,
-        errorCode: code,
-        model: failed.model,
-        confidentialCompute: true,
-        durationMs: failed.durationMs,
-        promptVersion: PROMPT_VERSION,
-      });
-      return NextResponse.json({ error: code }, { status: 502 });
-    }
-    if (!compiler.ok || !mapper.ok || !reviewer.ok || !planner.ok) {
-      throw new Error("ANALYSIS_STAGE_FAILED");
+        progress,
+        "requirement_compiler",
+      );
     }
 
-    const compilerOutput = canonicalizeCompilerOutput(
-      compiler.result.data as CompilerOutput,
+    const [compiledContext, candidates] = await Promise.all([
+      convex.query(api.analysis.getContext, { applicationId }),
+      convex.query(api.analysis.getStageCandidates, { applicationId }),
+    ]);
+    const canonicalRequirements = compiledContext.requirements.map(
+      ({ key, label }) => ({ key, label }),
     );
-    await refreshConvexAuth();
-    await applyStageOutput(
-      convex,
-      applicationId,
-      "requirement_compiler",
-      compiler.run,
-      compilerOutput,
-      analysisContext,
-      requestData.documents,
+    const mapperIdentity = runIdentity(progress, "eligibility_mapper");
+    const mapperRows = candidates.mapper.filter(
+      (candidate) =>
+        candidate.generation === mapperIdentity.run.generation &&
+        candidate.attempt === mapperIdentity.run.attempt,
     );
-    await convex.mutation(api.analysis.finishStage, {
-      applicationId,
-      stage: "requirement_compiler",
-      ...compiler.run,
-      model: compiler.model,
-      confidentialCompute: true,
-      durationMs: compiler.durationMs,
-      inputTokens: compiler.result.usage.inputTokens,
-      outputTokens: compiler.result.usage.outputTokens,
-      promptVersion: PROMPT_VERSION,
-    });
+    const compilerEvidence = new Map(
+      compiledContext.evidence
+        .filter((evidence) => evidence.citationVerified)
+        .map((evidence) => [evidence.requirementId, evidence]),
+    );
+    const mapperOutput: MapperOutput = {
+      mappings: reconcileRequirementCoverage(
+        canonicalRequirements,
+        mapperRows.map((candidate) => ({
+          requirementKey: candidate.requirementKey,
+          requirementLabel: candidate.requirementLabel,
+          proposedState: candidate.proposedState,
+          reason: "Validated eligibility mapper conclusion.",
+          citation: {
+            documentName: candidate.citation.documentName,
+            pageNumber: candidate.citation.pageNumber,
+            quote: candidate.citation.excerpt,
+            confidence: candidate.citation.confidence,
+          },
+          claim: candidate.claim,
+        })),
+        (requirement) => {
+          const compiled = compiledContext.requirements.find(
+            (candidate) => candidate.key === requirement.key,
+          );
+          const evidence = compiled
+            ? compilerEvidence.get(compiled._id)
+            : undefined;
+          if (!compiled || !evidence) {
+            throw new Error("INCOMPLETE_REQUIREMENT_COVERAGE");
+          }
+          return {
+            requirementKey: requirement.key,
+            requirementLabel: requirement.label,
+            proposedState: "needs_verification" as const,
+            reason: "No matching normalized mapper conclusion was available.",
+            citation: {
+              documentName: evidence.documentName,
+              pageNumber: evidence.pageNumber,
+              quote: evidence.excerpt,
+              confidence: evidence.confidence,
+            },
+            claim: undefined,
+          };
+        },
+      ),
+    };
 
-    const compiledContext = await convex.query(api.analysis.getContext, {
-      applicationId,
-    });
-    const canonicalRequirements = (
-      compiledContext.requirements as Array<{ key: string; label: string }>
-    ).map(({ key, label }) => ({ key, label }));
-    const mapperOutput = mapper.result.data as MapperOutput;
-    mapperOutput.mappings = reconcileRequirementCoverage(
-      canonicalRequirements,
-      mapperOutput.mappings,
-      (requirement) => {
-        const compiled = compilerOutput.requirements.find(
-          (candidate) => candidate.key === requirement.key,
-        );
-        if (!compiled) throw new Error("INCOMPLETE_REQUIREMENT_COVERAGE");
-        return {
+    const reviewerIdentity = runIdentity(progress, "red_team_reviewer");
+    const reviewerReady =
+      reviewerIdentity.stage.readyAt !== undefined ||
+      reviewerIdentity.stage.status === "complete";
+    const reviewerRows = reviewerReady
+      ? candidates.reviewer.filter(
+          (candidate) =>
+            candidate.generation === reviewerIdentity.run.generation &&
+            candidate.attempt === reviewerIdentity.run.attempt,
+        )
+      : [];
+    const reviewerOutput: ReviewerOutput = {
+      reviews: reconcileRequirementCoverage(
+        canonicalRequirements,
+        reviewerRows.map((candidate) => ({
+          requirementKey: candidate.requirementKey,
+          requirementLabel: candidate.requirementLabel,
+          state: candidate.state,
+          evidenceVerdict: candidate.evidenceVerdict,
+          reason: "Independent reviewer conclusion.",
+        })),
+        (requirement) => ({
           requirementKey: requirement.key,
           requirementLabel: requirement.label,
-          proposedState: "needs_verification",
-          reason:
-            "The independent mapper did not return a matching assessment.",
-          citation: compiled.citation,
-          claim: undefined,
-        };
-      },
+          state: "needs_verification" as const,
+          evidenceVerdict: "unclear" as const,
+          reason: "Independent review was unavailable within the time budget.",
+        }),
+      ),
+    };
+    const reviewByKey = new Map(
+      reviewerOutput.reviews.map((review) => [review.requirementKey, review]),
     );
-    const reviewerOutput = reviewer.result.data as ReviewerOutput;
-    reviewerOutput.reviews = reconcileRequirementCoverage(
-      canonicalRequirements,
-      reviewerOutput.reviews,
-      (requirement) => ({
-        requirementKey: requirement.key,
-        requirementLabel: requirement.label,
-        state: "needs_verification",
-        evidenceVerdict: "unclear",
-        reason:
-          "The independent reviewer did not return a matching conclusion.",
-      }),
+    const mapperCandidateByKey = new Map(
+      mapperRows.map((candidate) => [candidate.requirementKey, candidate]),
     );
-    await applyStageOutput(
+    const availableDocumentNames = requestData.documentNames;
+    const profile = compiledContext.profile;
+    const requirementByKey = new Map(
+      compiledContext.requirements.map((requirement) => [
+        requirement.key,
+        requirement,
+      ]),
+    );
+    const mappings = mapperOutput.mappings.map((mapping) => {
+      const requirement = requirementByKey.get(mapping.requirementKey);
+      if (!requirement) {
+        throw new Error("INCOMPLETE_REQUIREMENT_COVERAGE");
+      }
+      const candidate = mapperCandidateByKey.get(mapping.requirementKey);
+      const profileResult = evaluateCondition(
+        requirement,
+        profile,
+        availableDocumentNames,
+      );
+      const sourceEvidence = compilerEvidence.get(requirement._id);
+      const candidateCitation = candidate?.citation;
+      const resolution = resolveEvidenceConsensus({
+        requirement,
+        mapping,
+        review: reviewerReady
+          ? reviewByKey.get(mapping.requirementKey)
+          : undefined,
+        profileResult,
+        citationVerified:
+          profileResult === null
+            ? (candidateCitation?.verified ?? false)
+            : (sourceEvidence?.citationVerified ??
+              candidateCitation?.verified ??
+              false),
+        citationIsSupporting: candidate?.citationIsSupporting ?? false,
+        citationSubjectValidated:
+          candidate?.citationSubjectValidated ?? false,
+        claimValidated: candidate?.claimValidated ?? false,
+      });
+      const groundedCitation =
+        resolution.usedSupportingEvidence || profileResult === null
+          ? candidateCitation
+          : sourceEvidence
+            ? {
+                documentName: sourceEvidence.documentName,
+                pageNumber: sourceEvidence.pageNumber,
+                excerpt: sourceEvidence.excerpt,
+                confidence: sourceEvidence.confidence,
+                verified: sourceEvidence.citationVerified,
+                matchKind: "deterministic" as const,
+              }
+            : candidateCitation;
+      if (!groundedCitation) {
+        throw new Error("INCOMPLETE_REQUIREMENT_COVERAGE");
+      }
+      return {
+        requirementKey: mapping.requirementKey,
+        state: resolution.state,
+        deterministicResult: resolution.deterministicResult,
+        citation: groundedCitation,
+      };
+    });
+    await convex.mutation(api.analysis.applyEligibilityMapper, {
+      applicationId,
+      ...mapperIdentity.run,
+      mappings,
+    });
+    await finishReadyStage(
       convex,
       applicationId,
+      progress,
       "eligibility_mapper",
-      mapper.run,
-      mapperOutput,
-      compiledContext,
-      requestData.documents,
-      reviewerOutput.reviews,
     );
-    await convex.mutation(api.analysis.finishStage, {
-      applicationId,
-      stage: "eligibility_mapper",
-      ...mapper.run,
-      model: mapper.model,
-      confidentialCompute: true,
-      durationMs: mapper.durationMs,
-      inputTokens: mapper.result.usage.inputTokens,
-      outputTokens: mapper.result.usage.outputTokens,
-      promptVersion: PROMPT_VERSION,
-    });
 
     const mappedContext = await convex.query(api.analysis.getContext, {
       applicationId,
     });
-    const mappedState = new Map(
+    const mappedStates = new Map(
       mappedContext.requirements.map((requirement) => [
         requirement.key,
         requirement.state,
       ]),
     );
-    reviewerOutput.reviews = reviewerOutput.reviews.map((review) => ({
-      ...review,
-      state: mappedState.get(review.requirementKey) ?? "needs_verification",
-    }));
-    await applyStageOutput(
-      convex,
-      applicationId,
-      "red_team_reviewer",
-      reviewer.run,
-      reviewerOutput,
-      mappedContext,
-      requestData.documents,
-    );
-    await convex.mutation(api.analysis.finishStage, {
-      applicationId,
-      stage: "red_team_reviewer",
-      ...reviewer.run,
-      model: reviewer.model,
-      confidentialCompute: true,
-      durationMs: reviewer.durationMs,
-      inputTokens: reviewer.result.usage.inputTokens,
-      outputTokens: reviewer.result.usage.outputTokens,
-      promptVersion: PROMPT_VERSION,
-    });
+    if (reviewerReady && reviewerIdentity.stage.status !== "complete") {
+      await convex.mutation(api.analysis.applyRedTeamReviewer, {
+        applicationId,
+        ...reviewerIdentity.run,
+        reviews: reviewerOutput.reviews.map((review) => ({
+          requirementKey: review.requirementKey,
+          state:
+            mappedStates.get(review.requirementKey) ?? "needs_verification",
+          reason: review.reason,
+        })),
+      });
+      await finishReadyStage(
+        convex,
+        applicationId,
+        progress,
+        "red_team_reviewer",
+      );
+    } else if (!reviewerReady) {
+      await convex.mutation(api.analysis.finishOptionalStageWithFallback, {
+        applicationId,
+        stage: "red_team_reviewer",
+        ...reviewerIdentity.run,
+        errorCode:
+          reviewerIdentity.stage.errorCode ?? "OPTIONAL_STAGE_DEADLINE",
+      });
+    }
 
     const reviewedContext = await convex.query(api.analysis.getContext, {
       applicationId,
     });
+    const plannerIdentity = runIdentity(progress, "action_planner");
+    const plannerReady =
+      plannerIdentity.stage.readyAt !== undefined ||
+      plannerIdentity.stage.status === "complete";
     const plannerOutput = buildStablePlan(
       reviewedContext.requirements,
       reviewedContext.application.deadline,
     );
-    await applyStageOutput(
-      convex,
+    validateActionDag(plannerOutput.actions);
+    await convex.mutation(api.analysis.applyActionPlanner, {
       applicationId,
-      "action_planner",
-      planner.run,
-      plannerOutput,
-      reviewedContext,
-      requestData.documents,
-    );
-    await convex.mutation(api.analysis.finishStage, {
-      applicationId,
-      stage: "action_planner",
-      ...planner.run,
-      model: planner.model,
-      confidentialCompute: true,
-      durationMs: planner.durationMs,
-      inputTokens: planner.result.usage.inputTokens,
-      outputTokens: planner.result.usage.outputTokens,
+      ...plannerIdentity.run,
+      missingDocuments: plannerOutput.missingDocuments,
+      actions: plannerOutput.actions,
+    });
+    if (plannerReady && plannerIdentity.stage.status !== "complete") {
+      await finishReadyStage(
+        convex,
+        applicationId,
+        progress,
+        "action_planner",
+      );
+    } else if (!plannerReady) {
+      await convex.mutation(api.analysis.finishOptionalStageWithFallback, {
+        applicationId,
+        stage: "action_planner",
+        ...plannerIdentity.run,
+        errorCode: plannerIdentity.stage.errorCode ?? "DETERMINISTIC_PLAN_USED",
+      });
+    }
+    await convex.mutation(api.analysis.completeAnalysis, { applicationId });
+
+    progress = (await convex.query(api.applications.getProgress, {
+      id: applicationId,
+    })) as Progress;
+    return NextResponse.json({
+      ok: progress.application.state === "complete",
+      durationMs: Date.now() - finalizationStartedAt,
+      degradedStages: progress.stages
+        .filter(
+          (stage) =>
+            stage.status === "complete" &&
+            stage.errorCode !== undefined,
+        )
+        .map((stage) => stage.stage),
       promptVersion: PROMPT_VERSION,
     });
-    return NextResponse.json({
-      ok: true,
-      durationMs: Date.now() - ensembleStartedAt,
-    });
   } catch (error) {
-    const code = errorCode(error);
-    try {
-      if (!began) throw error;
-      await refreshConvexAuth();
-      const progress = await convex.query(api.applications.getProgress, {
-        id: applicationId,
-      });
-      const running = progress?.stages.find(
-        (candidate) => candidate.status === "running",
-      );
-      if (running) {
-        await convex.mutation(api.analysis.failStage, {
-          applicationId,
-          stage: running.stage,
-          generation: running.generation ?? 0,
-          attempt: running.attempt,
-          errorCode: code,
-          durationMs: Date.now() - ensembleStartedAt,
-          promptVersion: PROMPT_VERSION,
-        });
-      }
-    } catch {
-      // Preserve the original failure response if persistence is unavailable.
-    }
+    const code =
+      error instanceof Error && /^[A-Z0-9_]+$/.test(error.message)
+        ? error.message
+        : "ANALYSIS_FINALIZATION_FAILED";
     return NextResponse.json({ error: code }, { status: 502 });
   }
 }

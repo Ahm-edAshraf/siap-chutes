@@ -194,12 +194,14 @@ describe("Chutes reliability", () => {
         type: string;
         json_schema: { strict: boolean; schema: unknown };
       };
+      chat_template_kwargs: { enable_thinking: boolean };
     };
     expect(body.response_format).toMatchObject({
       type: "json_schema",
       json_schema: { strict: true },
     });
     expect(body.response_format.json_schema.schema).toBeTruthy();
+    expect(body.chat_template_kwargs.enable_thinking).toBe(false);
   });
 
   test("applies an agent-specific output-token cap", async () => {
@@ -260,6 +262,25 @@ describe("Chutes reliability", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(3);
   });
 
+  test("does not retry a model request cancelled after another hedge wins", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetchImpl = vi
+      .fn()
+      .mockRejectedValue(new DOMException("Cancelled", "AbortError"));
+    await expect(
+      runStructuredStage(
+        "tee-model",
+        "prompt",
+        z.object({ ok: z.boolean() }),
+        "{ok:boolean}",
+        async () => "token",
+        { fetchImpl, signal: controller.signal },
+      ),
+    ).rejects.toThrow();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   test("does not start a request after the stage deadline", async () => {
     const fetchImpl = vi.fn();
     await expect(
@@ -288,5 +309,24 @@ describe("Chutes reliability", () => {
       ),
     ).rejects.toThrow("MALFORMED_MODEL_OUTPUT");
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  test("lets the orchestrator switch models instead of repairing malformed output", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse({
+        choices: [{ message: { content: "not valid JSON" } }],
+      }),
+    );
+    await expect(
+      runStructuredStage(
+        "tee-model",
+        "prompt",
+        z.object({ ok: z.boolean() }),
+        "{ok:boolean}",
+        async () => "token",
+        { fetchImpl, repairMalformed: false },
+      ),
+    ).rejects.toThrow("MALFORMED_MODEL_OUTPUT");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });

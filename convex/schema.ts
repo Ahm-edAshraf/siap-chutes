@@ -71,6 +71,7 @@ export default defineSchema({
     errorCode: v.optional(v.string()),
     startedAt: v.optional(v.number()),
     readyAt: v.optional(v.number()),
+    appliedAt: v.optional(v.number()),
     completedAt: v.optional(v.number()),
     updatedAt: v.number(),
   })
@@ -105,10 +106,111 @@ export default defineSchema({
     outputTokens: v.optional(v.number()),
     promptVersion: v.string(),
     outcome: v.union(v.literal("success"), v.literal("failed")),
+    generation: v.optional(v.number()),
+    attempt: v.optional(v.number()),
+    modelAttempt: v.optional(v.number()),
+    errorCode: v.optional(v.string()),
+    fallbackUsed: v.optional(v.boolean()),
     createdAt: v.number(),
   })
     .index("by_application", ["applicationId", "createdAt"])
-    .index("by_user", ["userId", "createdAt"]),
+    .index("by_user", ["userId", "createdAt"])
+    .index("by_stage_and_created_at", ["stage", "createdAt"])
+    .index("by_application_stage_and_attempt", [
+      "applicationId",
+      "stage",
+      "generation",
+      "attempt",
+      "modelAttempt",
+    ]),
+
+  mapperCandidates: defineTable({
+    userId: v.id("users"),
+    applicationId: v.id("applications"),
+    generation: v.number(),
+    attempt: v.number(),
+    requirementKey: v.string(),
+    requirementLabel: v.string(),
+    proposedState: requirementState,
+    citation: v.object({
+      documentName: v.string(),
+      pageNumber: v.optional(v.number()),
+      excerpt: v.string(),
+      confidence,
+      verified: v.boolean(),
+      matchKind: v.union(
+        v.literal("document"),
+        v.literal("profile"),
+        v.literal("deterministic"),
+        v.literal("none"),
+      ),
+    }),
+    citationIsSupporting: v.boolean(),
+    citationSubjectValidated: v.optional(v.boolean()),
+    claimValidated: v.boolean(),
+    claim: v.optional(
+      v.object({
+        field: v.string(),
+        valueType: v.union(
+          v.literal("number"),
+          v.literal("boolean"),
+          v.literal("string"),
+          v.literal("date"),
+        ),
+        numberValue: v.optional(v.number()),
+        booleanValue: v.optional(v.boolean()),
+        stringValue: v.optional(v.string()),
+        dateValue: v.optional(v.string()),
+        unit: v.optional(v.string()),
+        subject: v.string(),
+        qualifiers: v.array(v.string()),
+        verbatimValue: v.string(),
+      }),
+    ),
+    createdAt: v.number(),
+  })
+    .index("by_application", ["applicationId"])
+    .index("by_application_generation_and_attempt", [
+      "applicationId",
+      "generation",
+      "attempt",
+    ]),
+
+  reviewerCandidates: defineTable({
+    userId: v.id("users"),
+    applicationId: v.id("applications"),
+    generation: v.number(),
+    attempt: v.number(),
+    requirementKey: v.string(),
+    requirementLabel: v.string(),
+    state: requirementState,
+    evidenceVerdict: v.union(
+      v.literal("supports_mapping"),
+      v.literal("contradicts_mapping"),
+      v.literal("unclear"),
+    ),
+    createdAt: v.number(),
+  })
+    .index("by_application", ["applicationId"])
+    .index("by_application_generation_and_attempt", [
+      "applicationId",
+      "generation",
+      "attempt",
+    ]),
+
+  plannerCandidates: defineTable({
+    userId: v.id("users"),
+    applicationId: v.id("applications"),
+    generation: v.number(),
+    attempt: v.number(),
+    recommendation: v.union(
+      v.literal("ready"),
+      v.literal("actions_required"),
+      v.literal("likely_ineligible"),
+    ),
+    priorityRequirementKeys: v.array(v.string()),
+    createdAt: v.number(),
+  }).index("by_application", ["applicationId"]),
 
   requirements: defineTable({
     userId: v.id("users"),

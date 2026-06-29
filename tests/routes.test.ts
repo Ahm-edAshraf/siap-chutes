@@ -14,6 +14,7 @@ import { GET as callback } from "@/app/api/auth/chutes/callback/route";
 import { POST as logout } from "@/app/api/auth/chutes/logout/route";
 import { GET as convexToken } from "@/app/api/auth/convex-token/route";
 import { POST as runEnsemble } from "@/app/api/analyses/[id]/ensemble/route";
+import { POST as runStage } from "@/app/api/analyses/[id]/stages/[stage]/route";
 import { AUTH_COOKIES } from "@/lib/auth/cookies";
 
 const { cookieValues, cookieOptions } = vi.hoisted(() => ({
@@ -196,6 +197,29 @@ describe("authentication route handlers", () => {
       {
         params: Promise.resolve({
           id: "not-an-id",
+        }),
+      },
+    );
+    expect(response.status).toBe(403);
+  });
+
+  test("independent stage handler rejects cross-origin requests before processing", async () => {
+    const response = await runStage(
+      new Request(
+        "https://siap.test/api/analyses/not-an-id/stages/requirement_compiler",
+        {
+          method: "POST",
+          headers: {
+            origin: "https://attacker.test",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ documents: [] }),
+        },
+      ),
+      {
+        params: Promise.resolve({
+          id: "not-an-id",
+          stage: "requirement_compiler",
         }),
       },
     );

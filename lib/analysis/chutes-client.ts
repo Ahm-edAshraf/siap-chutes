@@ -6,11 +6,15 @@ import { buildRepairPrompt } from "./prompt";
 const MODEL_ENDPOINT = "https://llm.chutes.ai/v1/models";
 const COMPLETIONS_ENDPOINT = "https://llm.chutes.ai/v1/chat/completions";
 
-const FALLBACK_MODELS = [
+export const FALLBACK_MODELS = [
   "google/gemma-4-31B-turbo-TEE",
-  "zai-org/GLM-5-TEE",
+  "zai-org/GLM-5.1-TEE",
+  "moonshotai/Kimi-K2.6-TEE",
+  "Qwen/Qwen3-32B-TEE",
   "deepseek-ai/DeepSeek-V3.2-TEE",
   "MiniMaxAI/MiniMax-M2.5-TEE",
+  "Qwen/Qwen3.6-27B-TEE",
+  "zai-org/GLM-5-TEE",
 ] as const;
 
 const modelCatalogSchema = z.object({
@@ -48,6 +52,9 @@ export interface ChutesRequestOptions {
   sleep?: (milliseconds: number) => Promise<void>;
   deadlineAt?: number;
   maxTokens?: number;
+  requestTimeoutMs?: number;
+  repairMalformed?: boolean;
+  signal?: AbortSignal;
 }
 
 function stageTimeout() {
@@ -93,9 +100,15 @@ async function requestWithRetry(
           authorization: `Bearer ${token}`,
         },
         cache: "no-store",
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: options.signal
+          ? AbortSignal.any([
+              AbortSignal.timeout(timeoutMs),
+              options.signal,
+            ])
+          : AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
+      if (options.signal?.aborted) throw error;
       if (
         transientAttempts >= 2 ||
         (options.deadlineAt !== undefined && options.deadlineAt <= Date.now())
@@ -137,25 +150,8 @@ export async function selectTeeModel(
   excludedModels: string[] = [],
   options: ChutesRequestOptions = {},
 ) {
-  const response = await requestWithRetry(
-    MODEL_ENDPOINT,
-    { method: "GET" },
-    getAccessToken,
-    30_000,
-    options,
-  );
-  if (!response.ok) {
-    throw new Error(`CHUTES_MODEL_CATALOG_${response.status}`);
-  }
-  const catalog = modelCatalogSchema.parse(await response.json());
-  const approved = new Map(
-    catalog.data
-      .filter(
-        (model) =>
-          model.confidential_compute &&
-          model.supported_features?.includes("structured_outputs"),
-      )
-      .map((model) => [model.id, model]),
+  const approved = new Set(
+    await listApprovedTeeModels(getAccessToken, options),
   );
   const candidates = [requestedModel, ...FALLBACK_MODELS];
   const selected = candidates.find(
@@ -163,6 +159,30 @@ export async function selectTeeModel(
   );
   if (!selected) throw new Error("NO_APPROVED_TEE_MODEL");
   return selected;
+}
+
+export async function listApprovedTeeModels(
+  getAccessToken: AccessTokenProvider,
+  options: ChutesRequestOptions = {},
+) {
+  const response = await requestWithRetry(
+    MODEL_ENDPOINT,
+    { method: "GET" },
+    getAccessToken,
+    Math.min(options.requestTimeoutMs ?? 30_000, 30_000),
+    options,
+  );
+  if (!response.ok) {
+    throw new Error(`CHUTES_MODEL_CATALOG_${response.status}`);
+  }
+  const catalog = modelCatalogSchema.parse(await response.json());
+  return catalog.data
+    .filter(
+      (model) =>
+        model.confidential_compute &&
+        model.supported_features?.includes("structured_outputs"),
+    )
+    .map((model) => model.id);
 }
 
 export async function selectDistinctTeeModels<T extends string>(
@@ -235,12 +255,15 @@ async function createCompletion<T>(
             schema: jsonSchema,
           },
         },
+        chat_template_kwargs: {
+          enable_thinking: false,
+        },
         temperature: 0,
         max_tokens: options.maxTokens ?? 8_000,
       }),
     },
     getAccessToken,
-    240_000,
+    options.requestTimeoutMs ?? 240_000,
     options,
   );
   if (!response.ok) {
@@ -274,6 +297,9 @@ export async function runStructuredStage<T>(
   const firstContent = completion.choices[0].message.content;
   let parsed = parse(firstContent);
   if (!parsed.success) {
+    if (options.repairMalformed === false) {
+      throw new Error("MALFORMED_MODEL_OUTPUT");
+    }
     completion = await createCompletion(
       model,
       buildRepairPrompt(prompt, firstContent, schemaDescription),

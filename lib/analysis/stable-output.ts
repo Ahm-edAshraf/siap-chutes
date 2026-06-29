@@ -19,6 +19,90 @@ function cleanSentence(value: string) {
   return value.trim().replace(/[.!?]+$/, "");
 }
 
+function normalizeProgrammeName(value: string) {
+  return value
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/\s+(?:19|20)\d{2}$/u, "")
+    .trim();
+}
+
+function stableRequirementLabel(
+  requirement: CompilerOutput["requirements"][number],
+) {
+  if (
+    requirement.kind === "citizenship" ||
+    requirement.condition?.type === "citizenship_equals"
+  ) {
+    return "Citizenship";
+  }
+  if (
+    requirement.kind === "age" ||
+    requirement.condition?.type === "age_max_on"
+  ) {
+    return "Age";
+  }
+  if (
+    requirement.kind === "income" ||
+    requirement.condition?.type === "income_max"
+  ) {
+    return "Household income";
+  }
+  if (
+    requirement.kind === "study_level" ||
+    requirement.condition?.type === "study_level_in"
+  ) {
+    return "Study status";
+  }
+  if (
+    requirement.kind === "document" ||
+    requirement.condition?.type === "document_present"
+  ) {
+    return requirement.condition?.documentNames?.[0] ?? requirement.label;
+  }
+  const semanticText =
+    `${requirement.label} ${requirement.description ?? ""} ${requirement.citation.quote}`.toLocaleLowerCase(
+      "en",
+    );
+  if (/grade point average|\bgpa\b/u.test(semanticText)) {
+    return "Academic standing";
+  }
+  if (
+    /(?:other|another|full)\s+scholarship|scholarship.+same academic year/u.test(
+      semanticText,
+    )
+  ) {
+    return "Other funding";
+  }
+  return cleanSentence(requirement.label);
+}
+
+function requirementIdentity(
+  requirement: CompilerOutput["requirements"][number],
+) {
+  if (
+    requirement.kind === "document" ||
+    requirement.condition?.type === "document_present"
+  ) {
+    return `document:${(requirement.condition?.documentNames ?? [
+      requirement.label,
+    ])
+      .map((value) => value.toLocaleLowerCase("en").trim())
+      .sort()
+      .join("|")}`;
+  }
+  return [
+    requirement.kind,
+    requirement.condition?.type ?? "",
+    requirement.citation.documentName.toLocaleLowerCase("en"),
+    requirement.citation.pageNumber ?? "",
+    requirement.citation.quote
+      .toLocaleLowerCase("en")
+      .replace(/\s+/g, " ")
+      .trim(),
+  ].join(":");
+}
+
 function suggestedDate(deadline: string | undefined, urgency: "critical" | "required") {
   const parsed = deadline ? parseDeadline(deadline) : null;
   if (!parsed) return "As soon as possible";
@@ -30,15 +114,30 @@ function suggestedDate(deadline: string | undefined, urgency: "critical" | "requ
 export function canonicalizeCompilerOutput(
   output: CompilerOutput,
 ): CompilerOutput {
+  const seen = new Set<string>();
+  const requirements = output.requirements.filter((requirement) => {
+    if (
+      requirement.kind === "deadline" ||
+      requirement.condition?.type === "deadline_after"
+    ) {
+      return false;
+    }
+    const identity = requirementIdentity(requirement);
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
   return {
     ...output,
     programme: {
       ...output.programme,
+      name: normalizeProgrammeName(output.programme.name),
       deadline: normalizeDeadline(output.programme.deadline),
     },
-    requirements: output.requirements.map((requirement, index) => ({
+    requirements: requirements.map((requirement, index) => ({
       ...requirement,
       key: `req_${String(index + 1).padStart(3, "0")}`,
+      label: stableRequirementLabel(requirement),
     })),
   };
 }

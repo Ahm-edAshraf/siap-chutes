@@ -28,35 +28,51 @@ Siap compiles that process into an auditable workspace:
 
 ## Chutes integration
 
-One analysis starts four distinct structured-output TEE models concurrently:
+One analysis starts four independent, bounded structured-output TEE agents:
 
 | Agent | Default model | Responsibility |
 | --- | --- | --- |
-| Requirement compiler | `google/gemma-4-31B-turbo-TEE` | Extract rules, deadlines, and citations |
-| Eligibility mapper | `MiniMaxAI/MiniMax-M2.5-TEE` | Extract typed, cited applicant evidence |
-| Independent reviewer | `deepseek-ai/DeepSeek-V3.2-TEE` | Challenge unsupported or optimistic conclusions |
-| Action planner | `zai-org/GLM-5-TEE` | Challenge the deterministic completion plan |
+| Requirement compiler | `zai-org/GLM-5.1-TEE` | Extract rules, deadlines, and citations |
+| Eligibility mapper | `moonshotai/Kimi-K2.6-TEE` | Extract typed, cited applicant evidence |
+| Independent reviewer | `google/gemma-4-31B-turbo-TEE` | Challenge unsupported or optimistic conclusions |
+| Action planner | `Qwen/Qwen3-32B-TEE` | Challenge the deterministic completion plan |
 
 The live Chutes catalogue is authoritative. Siap fails closed unless every
 selected model advertises confidential compute and structured-output support.
 Validated responses are reconciled deterministically. Typed numeric and
-categorical facts are evaluated in code; semantic facts require independently
-grounded mapper and reviewer agreement. Programme rules can never serve as
-applicant evidence.
+categorical facts are evaluated in code; semantic facts require grounded,
+subject-matched supporting evidence. The independent reviewer is advisory, so
+its availability cannot change the canonical report. Programme rules can never
+serve as applicant evidence.
 
 ```text
 Browser PDF/OCR
       |
       | transient extracted text
       v
-Next.js authenticated ensemble route
+Next.js bounded stage routes
       |
-      +---- Requirement compiler ----+
-      +---- Eligibility mapper ------+---- deterministic reconciliation
-      +---- Independent reviewer ----+                  |
-      +---- Action planner ----------+                  v
-                                                    Convex report
+      +---- Requirement compiler ----+---- normalized candidates
+      +---- Eligibility mapper ------+             |
+      +---- Independent reviewer ----+             v
+      +---- Action planner ----------+---- deterministic finalizer
+                                                     |
+                                                     v
+                                                 Convex report
 ```
+
+Each stage has an independent generation/attempt fence and shares a 90-second
+browser deadline. Compiler and mapper start first; reviewer and planner join
+after a 20-second head start. Non-thinking generation and stage-specific token
+caps bound latency. If a required primary is still running after its measured
+threshold, one distinct fallback hedges it; the first valid result wins and the
+loser is cancelled.
+Compiler and mapper results are required. If the reviewer misses the budget,
+semantic claims remain marked for verification; if the planner misses it, Siap
+uses its deterministic action-plan builder. A failed required stage can be
+retried without rerunning successful agents. Recent content-free model-run
+metadata ranks fallbacks by failure rate and p95 latency without silently
+changing a role's assigned primary.
 
 ## Privacy model
 
@@ -143,8 +159,8 @@ $env:E2E_AUTH_STATE = "playwright/.auth/chutes.json"
 bun run test:e2e
 ```
 
-It verifies four distinct live TEE model runs, persisted output, export,
-actions, deletion, and logout.
+It verifies four live TEE agent runs across multiple models, persisted output,
+export, actions, deletion, logout, and completion within 100 seconds.
 
 ## Deploy
 

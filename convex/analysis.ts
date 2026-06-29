@@ -17,6 +17,38 @@ type AnalysisStageName =
   | "red_team_reviewer"
   | "action_planner";
 
+const modelCitation = v.object({
+  documentName: v.string(),
+  pageNumber: v.optional(v.number()),
+  excerpt: v.string(),
+  confidence,
+  verified: v.boolean(),
+  matchKind: v.union(
+    v.literal("document"),
+    v.literal("profile"),
+    v.literal("deterministic"),
+    v.literal("none"),
+  ),
+});
+
+const evidenceClaim = v.object({
+  field: v.string(),
+  valueType: v.union(
+    v.literal("number"),
+    v.literal("boolean"),
+    v.literal("string"),
+    v.literal("date"),
+  ),
+  numberValue: v.optional(v.number()),
+  booleanValue: v.optional(v.boolean()),
+  stringValue: v.optional(v.string()),
+  dateValue: v.optional(v.string()),
+  unit: v.optional(v.string()),
+  subject: v.string(),
+  qualifiers: v.array(v.string()),
+  verbatimValue: v.string(),
+});
+
 const citation = v.object({
   documentName: v.string(),
   pageNumber: v.optional(v.number()),
@@ -28,6 +60,28 @@ const citation = v.object({
     v.literal("profile"),
     v.literal("deterministic"),
     v.literal("none"),
+  ),
+});
+
+const mapperCandidate = v.object({
+  requirementKey: v.string(),
+  requirementLabel: v.string(),
+  proposedState: requirementState,
+  citation: modelCitation,
+  citationIsSupporting: v.boolean(),
+  citationSubjectValidated: v.boolean(),
+  claimValidated: v.boolean(),
+  claim: v.optional(evidenceClaim),
+});
+
+const reviewerCandidate = v.object({
+  requirementKey: v.string(),
+  requirementLabel: v.string(),
+  state: requirementState,
+  evidenceVerdict: v.union(
+    v.literal("supports_mapping"),
+    v.literal("contradicts_mapping"),
+    v.literal("unclear"),
   ),
 });
 
@@ -191,6 +245,7 @@ export const beginEnsemble = mutation({
         attempt,
         startedAt: now,
         readyAt: undefined,
+        appliedAt: undefined,
         completedAt: undefined,
         errorCode: undefined,
         updatedAt: now,
@@ -220,6 +275,474 @@ export const beginEnsemble = mutation({
   },
 });
 
+export const beginStage = mutation({
+  args: {
+    applicationId: v.id("applications"),
+    stage: stageName,
+  },
+  returns: v.object({
+    status: v.union(
+      v.literal("started"),
+      v.literal("already_ready"),
+      v.literal("already_complete"),
+      v.literal("already_running"),
+    ),
+    generation: v.number(),
+    attempt: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    await requireAnalysisService(ctx);
+    const { application } = await requireOwnedApplication(
+      ctx,
+      args.applicationId,
+    );
+    const generation = application.analysisGeneration ?? 0;
+    const stage = await requireStage(ctx, args.applicationId, args.stage);
+    if ((stage.generation ?? 0) !== generation) {
+      throw new Error("STALE_ANALYSIS_RUN");
+    }
+    if (application.state === "complete" || stage.status === "complete") {
+      return {
+        status: "already_complete" as const,
+        generation,
+        attempt: stage.attempt,
+      };
+    }
+    if (application.state === "failed") {
+      throw new Error("Retry the failed application before continuing");
+    }
+    if (stage.readyAt !== undefined) {
+      return {
+        status: "already_ready" as const,
+        generation,
+        attempt: stage.attempt,
+      };
+    }
+    if (
+      stage.status === "running" &&
+      stage.startedAt !== undefined &&
+      stage.startedAt > Date.now() - 100_000
+    ) {
+      return {
+        status: "already_running" as const,
+        generation,
+        attempt: stage.attempt,
+      };
+    }
+
+    const now = Date.now();
+    const attempt = stage.attempt + 1;
+    await ctx.db.patch("analysisStages", stage._id, {
+      status: "running",
+      generation,
+      attempt,
+      startedAt: now,
+      readyAt: undefined,
+      appliedAt: undefined,
+      completedAt: undefined,
+      errorCode: undefined,
+      updatedAt: now,
+    });
+    await ctx.db.insert("analysisEvents", {
+      userId: application.userId,
+      applicationId: args.applicationId,
+      stage: args.stage,
+      type: stage.attempt === 0 ? "started" : "retrying",
+      messageKey:
+        stage.attempt === 0
+          ? `stage.${args.stage}.started_independent`
+          : `stage.${args.stage}.retrying`,
+      createdAt: now,
+    });
+    if (application.state === "draft") {
+      await ctx.db.patch("applications", args.applicationId, {
+        state: "reading_requirements",
+        outcome: "analysing",
+        startedAt: application.startedAt ?? now,
+        errorCode: undefined,
+        updatedAt: now,
+      });
+    }
+    return { status: "started" as const, generation, attempt };
+  },
+});
+
+export const getModelPerformance = query({
+  args: {
+    stage: stageName,
+    models: v.array(v.string()),
+  },
+  returns: v.array(
+    v.object({
+      model: v.string(),
+      samples: v.number(),
+      failures: v.number(),
+      failureRate: v.number(),
+      p95DurationMs: v.optional(v.number()),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    await requireAnalysisService(ctx);
+    const allowed = new Set(args.models.slice(0, 12));
+    const runs = await ctx.db
+      .query("modelRuns")
+      .withIndex("by_stage_and_created_at", (q) =>
+        q.eq("stage", args.stage),
+      )
+      .order("desc")
+      .take(200);
+    return [...allowed].map((model) => {
+      const matches = runs.filter((run) => run.model === model).slice(0, 30);
+      const successes = matches
+        .filter((run) => run.outcome === "success")
+        .map((run) => run.durationMs)
+        .sort((a, b) => a - b);
+      const p95Index = Math.max(0, Math.ceil(successes.length * 0.95) - 1);
+      const failures = matches.length - successes.length;
+      return {
+        model,
+        samples: matches.length,
+        failures,
+        failureRate: matches.length === 0 ? 0 : failures / matches.length,
+        p95DurationMs:
+          successes.length === 0 ? undefined : successes[p95Index],
+      };
+    });
+  },
+});
+
+export const saveMapperCandidates = mutation({
+  args: {
+    applicationId: v.id("applications"),
+    generation: v.number(),
+    attempt: v.number(),
+    mappings: v.array(mapperCandidate),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await requireAnalysisService(ctx);
+    const { application } = await requireOwnedApplication(
+      ctx,
+      args.applicationId,
+    );
+    await requireRunningStageRun(
+      ctx,
+      args.applicationId,
+      "eligibility_mapper",
+      args.generation,
+      args.attempt,
+    );
+    const old = await ctx.db
+      .query("mapperCandidates")
+      .withIndex("by_application", (q) =>
+        q.eq("applicationId", args.applicationId),
+      )
+      .collect();
+    for (const row of old) await ctx.db.delete("mapperCandidates", row._id);
+    const now = Date.now();
+    for (const mapping of args.mappings.slice(0, 100)) {
+      await ctx.db.insert("mapperCandidates", {
+        userId: application.userId,
+        applicationId: args.applicationId,
+        generation: args.generation,
+        attempt: args.attempt,
+        requirementKey: mapping.requirementKey,
+        requirementLabel: mapping.requirementLabel,
+        proposedState: mapping.proposedState,
+        citation: {
+          ...mapping.citation,
+          excerpt: mapping.citation.excerpt.slice(0, 240),
+        },
+        citationIsSupporting: mapping.citationIsSupporting,
+        citationSubjectValidated: mapping.citationSubjectValidated,
+        claimValidated: mapping.claimValidated,
+        claim: mapping.claim
+          ? {
+              ...mapping.claim,
+              stringValue: mapping.claim.stringValue?.slice(0, 200),
+              subject: mapping.claim.subject.slice(0, 120),
+              qualifiers: mapping.claim.qualifiers
+                .slice(0, 12)
+                .map((value) => value.slice(0, 80)),
+              verbatimValue: mapping.claim.verbatimValue.slice(0, 240),
+            }
+          : undefined,
+        createdAt: now,
+      });
+    }
+    return null;
+  },
+});
+
+export const saveReviewerCandidates = mutation({
+  args: {
+    applicationId: v.id("applications"),
+    generation: v.number(),
+    attempt: v.number(),
+    reviews: v.array(reviewerCandidate),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await requireAnalysisService(ctx);
+    const { application } = await requireOwnedApplication(
+      ctx,
+      args.applicationId,
+    );
+    await requireRunningStageRun(
+      ctx,
+      args.applicationId,
+      "red_team_reviewer",
+      args.generation,
+      args.attempt,
+    );
+    const old = await ctx.db
+      .query("reviewerCandidates")
+      .withIndex("by_application", (q) =>
+        q.eq("applicationId", args.applicationId),
+      )
+      .collect();
+    for (const row of old) await ctx.db.delete("reviewerCandidates", row._id);
+    const now = Date.now();
+    for (const review of args.reviews.slice(0, 100)) {
+      await ctx.db.insert("reviewerCandidates", {
+        userId: application.userId,
+        applicationId: args.applicationId,
+        generation: args.generation,
+        attempt: args.attempt,
+        ...review,
+        createdAt: now,
+      });
+    }
+    return null;
+  },
+});
+
+export const savePlannerCandidate = mutation({
+  args: {
+    applicationId: v.id("applications"),
+    generation: v.number(),
+    attempt: v.number(),
+    recommendation: v.union(
+      v.literal("ready"),
+      v.literal("actions_required"),
+      v.literal("likely_ineligible"),
+    ),
+    priorityRequirementKeys: v.array(v.string()),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await requireAnalysisService(ctx);
+    const { application } = await requireOwnedApplication(
+      ctx,
+      args.applicationId,
+    );
+    await requireRunningStageRun(
+      ctx,
+      args.applicationId,
+      "action_planner",
+      args.generation,
+      args.attempt,
+    );
+    const old = await ctx.db
+      .query("plannerCandidates")
+      .withIndex("by_application", (q) =>
+        q.eq("applicationId", args.applicationId),
+      )
+      .collect();
+    for (const row of old) await ctx.db.delete("plannerCandidates", row._id);
+    await ctx.db.insert("plannerCandidates", {
+      userId: application.userId,
+      applicationId: args.applicationId,
+      generation: args.generation,
+      attempt: args.attempt,
+      recommendation: args.recommendation,
+      priorityRequirementKeys: args.priorityRequirementKeys.slice(0, 20),
+      createdAt: Date.now(),
+    });
+    return null;
+  },
+});
+
+export const getStageCandidates = query({
+  args: { applicationId: v.id("applications") },
+  returns: v.object({
+    mapper: v.array(
+      v.object({
+        _id: v.id("mapperCandidates"),
+        _creationTime: v.number(),
+        userId: v.id("users"),
+        applicationId: v.id("applications"),
+        generation: v.number(),
+        attempt: v.number(),
+        requirementKey: v.string(),
+        requirementLabel: v.string(),
+        proposedState: requirementState,
+        citation: modelCitation,
+        citationIsSupporting: v.boolean(),
+        citationSubjectValidated: v.optional(v.boolean()),
+        claimValidated: v.boolean(),
+        claim: v.optional(evidenceClaim),
+        createdAt: v.number(),
+      }),
+    ),
+    reviewer: v.array(
+      v.object({
+        _id: v.id("reviewerCandidates"),
+        _creationTime: v.number(),
+        userId: v.id("users"),
+        applicationId: v.id("applications"),
+        generation: v.number(),
+        attempt: v.number(),
+        requirementKey: v.string(),
+        requirementLabel: v.string(),
+        state: requirementState,
+        evidenceVerdict: v.union(
+          v.literal("supports_mapping"),
+          v.literal("contradicts_mapping"),
+          v.literal("unclear"),
+        ),
+        createdAt: v.number(),
+      }),
+    ),
+    planner: v.array(
+      v.object({
+        _id: v.id("plannerCandidates"),
+        _creationTime: v.number(),
+        userId: v.id("users"),
+        applicationId: v.id("applications"),
+        generation: v.number(),
+        attempt: v.number(),
+        recommendation: v.union(
+          v.literal("ready"),
+          v.literal("actions_required"),
+          v.literal("likely_ineligible"),
+        ),
+        priorityRequirementKeys: v.array(v.string()),
+        createdAt: v.number(),
+      }),
+    ),
+  }),
+  handler: async (ctx, args) => {
+    await requireAnalysisService(ctx);
+    await requireOwnedApplication(ctx, args.applicationId);
+    const [mapper, reviewer, planner] = await Promise.all([
+      ctx.db
+        .query("mapperCandidates")
+        .withIndex("by_application", (q) =>
+          q.eq("applicationId", args.applicationId),
+        )
+        .collect(),
+      ctx.db
+        .query("reviewerCandidates")
+        .withIndex("by_application", (q) =>
+          q.eq("applicationId", args.applicationId),
+        )
+        .collect(),
+      ctx.db
+        .query("plannerCandidates")
+        .withIndex("by_application", (q) =>
+          q.eq("applicationId", args.applicationId),
+        )
+        .collect(),
+    ]);
+    return { mapper, reviewer, planner };
+  },
+});
+
+export const recordModelAttemptFailure = mutation({
+  args: {
+    applicationId: v.id("applications"),
+    stage: stageName,
+    generation: v.number(),
+    attempt: v.number(),
+    modelAttempt: v.number(),
+    model: v.string(),
+    confidentialCompute: v.boolean(),
+    durationMs: v.number(),
+    errorCode: v.string(),
+    promptVersion: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await requireAnalysisService(ctx);
+    const { user } = await requireOwnedApplication(ctx, args.applicationId);
+    await requireRunningStageRun(
+      ctx,
+      args.applicationId,
+      args.stage,
+      args.generation,
+      args.attempt,
+    );
+    const existing = await ctx.db
+      .query("modelRuns")
+      .withIndex("by_application_stage_and_attempt", (q) =>
+        q
+          .eq("applicationId", args.applicationId)
+          .eq("stage", args.stage)
+          .eq("generation", args.generation)
+          .eq("attempt", args.attempt)
+          .eq("modelAttempt", args.modelAttempt),
+      )
+      .unique();
+    if (existing) return null;
+    await ctx.db.insert("modelRuns", {
+      userId: user._id,
+      applicationId: args.applicationId,
+      stage: args.stage,
+      model: args.model,
+      confidentialCompute: args.confidentialCompute,
+      durationMs: args.durationMs,
+      promptVersion: args.promptVersion,
+      outcome: "failed",
+      generation: args.generation,
+      attempt: args.attempt,
+      modelAttempt: args.modelAttempt,
+      errorCode: args.errorCode,
+      fallbackUsed: args.modelAttempt > 0,
+      createdAt: Date.now(),
+    });
+    return null;
+  },
+});
+
+export const markStageRetryableFailure = mutation({
+  args: {
+    applicationId: v.id("applications"),
+    stage: stageName,
+    generation: v.number(),
+    attempt: v.number(),
+    errorCode: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await requireAnalysisService(ctx);
+    const { user } = await requireOwnedApplication(ctx, args.applicationId);
+    const stage = await requireRunningStageRun(
+      ctx,
+      args.applicationId,
+      args.stage,
+      args.generation,
+      args.attempt,
+    );
+    const now = Date.now();
+    await ctx.db.patch("analysisStages", stage._id, {
+      status: "failed",
+      errorCode: args.errorCode,
+      completedAt: now,
+      updatedAt: now,
+    });
+    await ctx.db.insert("analysisEvents", {
+      userId: user._id,
+      applicationId: args.applicationId,
+      stage: args.stage,
+      type: "failed",
+      messageKey: `stage.${args.stage}.retry_available`,
+      createdAt: now,
+    });
+    return null;
+  },
+});
+
 export const markAgentReady = mutation({
   args: {
     applicationId: v.id("applications"),
@@ -232,6 +755,8 @@ export const markAgentReady = mutation({
     inputTokens: v.optional(v.number()),
     outputTokens: v.optional(v.number()),
     promptVersion: v.string(),
+    modelAttempt: v.optional(v.number()),
+    fallbackUsed: v.optional(v.boolean()),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -260,6 +785,10 @@ export const markAgentReady = mutation({
       outputTokens: args.outputTokens,
       promptVersion: args.promptVersion,
       outcome: "success",
+      generation: args.generation,
+      attempt: args.attempt,
+      modelAttempt: args.modelAttempt ?? 0,
+      fallbackUsed: args.fallbackUsed ?? false,
       createdAt: now,
     });
     await ctx.db.patch("analysisStages", stage._id, {
@@ -275,6 +804,7 @@ export const applyRequirementCompiler = mutation({
     applicationId: v.id("applications"),
     generation: v.number(),
     attempt: v.number(),
+    promptVersion: v.optional(v.string()),
     programme: v.object({
       name: v.string(),
       deadline: v.optional(v.string()),
@@ -328,13 +858,14 @@ export const applyRequirementCompiler = mutation({
       ctx,
       args.applicationId,
     );
-    await requireRunningStageRun(
+    const stage = await requireRunningStageRun(
       ctx,
       args.applicationId,
       "requirement_compiler",
       args.generation,
       args.attempt,
     );
+    if (stage.appliedAt !== undefined) return null;
     const oldEvidence = await ctx.db
       .query("requirementEvidence")
       .withIndex("by_application", (q) =>
@@ -400,6 +931,11 @@ export const applyRequirementCompiler = mutation({
       name: args.programme.name,
       deadline: args.programme.deadline,
       summary: args.programme.summary.slice(0, 500),
+      promptVersion: args.promptVersion ?? application.promptVersion,
+      updatedAt: now,
+    });
+    await ctx.db.patch("analysisStages", stage._id, {
+      appliedAt: now,
       updatedAt: now,
     });
     return null;
@@ -427,13 +963,14 @@ export const applyEligibilityMapper = mutation({
       ctx,
       args.applicationId,
     );
-    await requireRunningStageRun(
+    const stage = await requireRunningStageRun(
       ctx,
       args.applicationId,
       "eligibility_mapper",
       args.generation,
       args.attempt,
     );
+    if (stage.appliedAt !== undefined) return null;
     const requirements = await ctx.db
       .query("requirements")
       .withIndex("by_application", (q) =>
@@ -470,6 +1007,10 @@ export const applyEligibilityMapper = mutation({
         createdAt: now,
       });
     }
+    await ctx.db.patch("analysisStages", stage._id, {
+      appliedAt: now,
+      updatedAt: now,
+    });
     return null;
   },
 });
@@ -498,13 +1039,14 @@ export const applyRedTeamReviewer = mutation({
   handler: async (ctx, args) => {
     await requireAnalysisService(ctx);
     await requireOwnedApplication(ctx, args.applicationId);
-    await requireRunningStageRun(
+    const stage = await requireRunningStageRun(
       ctx,
       args.applicationId,
       "red_team_reviewer",
       args.generation,
       args.attempt,
     );
+    if (stage.appliedAt !== undefined) return null;
     const now = Date.now();
     for (const review of args.reviews) {
       const requirement = await ctx.db
@@ -527,6 +1069,10 @@ export const applyRedTeamReviewer = mutation({
         updatedAt: now,
       });
     }
+    await ctx.db.patch("analysisStages", stage._id, {
+      appliedAt: now,
+      updatedAt: now,
+    });
     return null;
   },
 });
@@ -586,13 +1132,14 @@ export const applyActionPlanner = mutation({
       ctx,
       args.applicationId,
     );
-    await requireRunningStageRun(
+    const stage = await requireCurrentStageRun(
       ctx,
       args.applicationId,
       "action_planner",
       args.generation,
       args.attempt,
     );
+    if (stage.appliedAt !== undefined) return null;
     assertAcyclic(args.actions);
     const oldDependencies = await ctx.db
       .query("actionDependencies")
@@ -680,6 +1227,10 @@ export const applyActionPlanner = mutation({
         });
       }
     }
+    await ctx.db.patch("analysisStages", stage._id, {
+      appliedAt: now,
+      updatedAt: now,
+    });
     return null;
   },
 });
@@ -868,6 +1419,161 @@ export const failStage = mutation({
       messageKey: `stage.${args.stage}.failed`,
       createdAt: now,
     });
+    await ctx.db.patch("applications", args.applicationId, {
+      state: "failed",
+      outcome: "failed",
+      errorCode: args.errorCode,
+      updatedAt: now,
+    });
+    return null;
+  },
+});
+
+export const finishOptionalStageWithFallback = mutation({
+  args: {
+    applicationId: v.id("applications"),
+    stage: v.union(
+      v.literal("red_team_reviewer"),
+      v.literal("action_planner"),
+    ),
+    generation: v.number(),
+    attempt: v.number(),
+    errorCode: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await requireAnalysisService(ctx);
+    const { user } = await requireOwnedApplication(ctx, args.applicationId);
+    const stage = await requireCurrentStageRun(
+      ctx,
+      args.applicationId,
+      args.stage,
+      args.generation,
+      args.attempt,
+    );
+    if (stage.status === "complete") return null;
+    const now = Date.now();
+    await ctx.db.patch("analysisStages", stage._id, {
+      status: "complete",
+      errorCode: args.errorCode,
+      readyAt: stage.readyAt,
+      completedAt: now,
+      updatedAt: now,
+    });
+    await ctx.db.insert("analysisEvents", {
+      userId: user._id,
+      applicationId: args.applicationId,
+      stage: args.stage,
+      type: "completed",
+      messageKey: `stage.${args.stage}.deterministic_fallback`,
+      createdAt: now,
+    });
+    return null;
+  },
+});
+
+export const completeAnalysis = mutation({
+  args: { applicationId: v.id("applications") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await requireAnalysisService(ctx);
+    const { application } = await requireOwnedApplication(
+      ctx,
+      args.applicationId,
+    );
+    if (application.state === "complete") return null;
+    const stages = await ctx.db
+      .query("analysisStages")
+      .withIndex("by_application", (q) =>
+        q.eq("applicationId", args.applicationId),
+      )
+      .collect();
+    if (stages.some((stage) => stage.status !== "complete")) {
+      throw new Error("ANALYSIS_STAGES_INCOMPLETE");
+    }
+    const [requirements, actions, missingDocuments] = await Promise.all([
+      ctx.db
+        .query("requirements")
+        .withIndex("by_application", (q) =>
+          q.eq("applicationId", args.applicationId),
+        )
+        .collect(),
+      ctx.db
+        .query("actionItems")
+        .withIndex("by_application", (q) =>
+          q.eq("applicationId", args.applicationId),
+        )
+        .collect(),
+      ctx.db
+        .query("missingDocuments")
+        .withIndex("by_application", (q) =>
+          q.eq("applicationId", args.applicationId),
+        )
+        .collect(),
+    ]);
+    const totalWeight = requirements.reduce((sum, row) => sum + row.weight, 0);
+    const earned = requirements.reduce(
+      (sum, row) =>
+        sum +
+        row.weight *
+          (row.state === "confirmed"
+            ? 1
+            : row.state === "needs_verification"
+              ? 0.5
+              : 0),
+      0,
+    );
+    const evidenceScore =
+      totalWeight === 0 ? 0 : Math.round((earned / totalWeight) * 80);
+    const actionScore =
+      actions.length === 0 && missingDocuments.length === 0 ? 20 : 0;
+    const hasNotMet = requirements.some(
+      (row) => row.mandatory && row.state === "not_met",
+    );
+    const outcome = hasNotMet
+      ? "likely_ineligible"
+      : missingDocuments.length > 0 ||
+          actions.length > 0 ||
+          requirements.some((row) => row.state !== "confirmed")
+        ? "action_required"
+        : "ready_to_submit";
+    const now = Date.now();
+    await ctx.db.patch("applications", args.applicationId, {
+      state: "complete",
+      outcome,
+      evidenceScore,
+      actionScore,
+      readinessScore: evidenceScore + actionScore,
+      completedAt: now,
+      updatedAt: now,
+    });
+    return null;
+  },
+});
+
+export const failAnalysis = mutation({
+  args: {
+    applicationId: v.id("applications"),
+    stage: v.union(
+      v.literal("requirement_compiler"),
+      v.literal("eligibility_mapper"),
+    ),
+    errorCode: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await requireAnalysisService(ctx);
+    await requireOwnedApplication(ctx, args.applicationId);
+    const stage = await requireStage(ctx, args.applicationId, args.stage);
+    const now = Date.now();
+    if (stage.status !== "complete") {
+      await ctx.db.patch("analysisStages", stage._id, {
+        status: "failed",
+        errorCode: args.errorCode,
+        completedAt: now,
+        updatedAt: now,
+      });
+    }
     await ctx.db.patch("applications", args.applicationId, {
       state: "failed",
       outcome: "failed",

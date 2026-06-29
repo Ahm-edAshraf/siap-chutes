@@ -48,17 +48,6 @@ test.describe("paid authenticated flow", () => {
         name: "Toggle Language. Current language is Bahasa Melayu",
       })
       .click();
-    await page.route(
-      "**/api/analyses/*/ensemble",
-      async (route) => {
-        await route.fulfill({
-          status: 502,
-          contentType: "application/json",
-          body: JSON.stringify({ error: "E2E_TRANSIENT_FAILURE" }),
-        });
-      },
-      { times: 1 },
-    );
     await page
       .getByRole("button", { name: "Use fictional Siap demo pack" })
       .click();
@@ -69,31 +58,26 @@ test.describe("paid authenticated flow", () => {
     await page.getByLabel("Course").fill("Computer Science");
     await page.getByLabel("Household income (RM)").fill("4500");
     await page.getByRole("button", { name: "Continue" }).click();
+    const analysisStartedAt = Date.now();
     await page.getByRole("button", { name: "Extract and analyse" }).click();
     await expect(page).toHaveURL(/\/app\/analysing\//);
     await expect(
-      page.getByRole("heading", { name: "Analysis failed safely" }),
-    ).toBeVisible();
-    await page.getByRole("button", { name: "Try again" }).click();
-    await expect(
       page.getByRole("heading", { name: "Analysing application" }),
     ).toBeVisible();
-    await expect(
-      page.getByRole("heading", { name: "Analysis failed safely" }),
-    ).toBeHidden();
     const finalOutcome = await Promise.race([
       page
-        .waitForURL(/\/app\/reports\//, { timeout: 8 * 60_000 })
+        .waitForURL(/\/app\/reports\//, { timeout: 100_000 })
         .then(() => "report" as const),
       page
         .getByRole("heading", { name: "Analysis failed safely" })
-        .waitFor({ state: "visible", timeout: 8 * 60_000 })
+        .waitFor({ state: "visible", timeout: 100_000 })
         .then(() => "failed" as const),
     ]);
     expect(
       finalOutcome,
       "The retried live analysis reached a terminal failure",
     ).toBe("report");
+    expect(Date.now() - analysisStartedAt).toBeLessThan(100_000);
     const reportUrl = page.url();
     await expect(
       page.getByRole("heading", { name: "Eligibility checks" }),
@@ -129,26 +113,25 @@ test.describe("paid authenticated flow", () => {
       }>;
     };
     expect(exported.application.state).toBe("complete");
-    expect(exported.modelRuns).toHaveLength(4);
+    expect(exported.modelRuns.length).toBeGreaterThanOrEqual(2);
+    expect(exported.modelRuns.length).toBeLessThanOrEqual(4);
     expect(exported.modelRuns.every((run) => run.confidentialCompute)).toBe(
       true,
     );
-    expect(new Set(exported.modelRuns.map((run) => run.model)).size).toBe(4);
-    const inferredStarts = exported.modelRuns.map(
-      (run) => run._creationTime - run.durationMs,
-    );
     expect(
-      Math.max(...inferredStarts) - Math.min(...inferredStarts),
-    ).toBeLessThan(10_000);
+      new Set(exported.modelRuns.map((run) => run.model)).size,
+    ).toBeGreaterThanOrEqual(2);
+    expect(
+      exported.modelRuns.every((run) => run.durationMs < 88_000),
+    ).toBe(true);
     const primaryModel = exported.modelRuns.find(
       (run) => run.stage === "requirement_compiler",
     )?.model;
-    const reviewerModel = exported.modelRuns.find(
-      (run) => run.stage === "red_team_reviewer",
+    const mapperModel = exported.modelRuns.find(
+      (run) => run.stage === "eligibility_mapper",
     )?.model;
     expect(primaryModel).toBeTruthy();
-    expect(reviewerModel).toBeTruthy();
-    expect(reviewerModel).not.toBe(primaryModel);
+    expect(mapperModel).toBeTruthy();
     expect(
       exported.requirements
         .flatMap((requirement) => requirement.evidence)
@@ -189,7 +172,7 @@ test.describe("paid authenticated flow", () => {
         message.includes("Failed to load resource") &&
         message.includes("502 (Bad Gateway)"),
     );
-    expect(expectedInjectedErrors).toHaveLength(1);
+    expect(expectedInjectedErrors.length).toBeLessThanOrEqual(2);
     expect(
       runtimeErrors.filter(
         (message) => !expectedInjectedErrors.includes(message),

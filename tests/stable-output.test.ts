@@ -8,7 +8,7 @@ describe("stable ensemble output", () => {
   test("canonicalizes source-order keys and deadline storage", () => {
     const output = canonicalizeCompilerOutput({
       programme: {
-        name: "Scholarship",
+        name: "Scholarship 2026",
         deadline: "2026-09-30T23:59:00",
         summary: "Summary",
       },
@@ -28,10 +28,14 @@ describe("stable ensemble output", () => {
         },
         {
           key: "transcript",
-          label: "Certified transcript",
+          label: "Registrar-certified transcript",
           kind: "document",
           weight: 1,
           mandatory: true,
+          condition: {
+            type: "document_present",
+            documentNames: ["Certified transcript"],
+          },
           citation: {
             documentName: "pack.pdf",
             pageNumber: 2,
@@ -39,12 +43,34 @@ describe("stable ensemble output", () => {
             confidence: "high",
           },
         },
+        {
+          key: "deadline",
+          label: "Application deadline",
+          kind: "deadline",
+          weight: 1,
+          mandatory: true,
+          condition: {
+            type: "deadline_after",
+            comparisonDate: "2026-09-30",
+          },
+          citation: {
+            documentName: "pack.pdf",
+            pageNumber: 2,
+            quote: "Apply by 30 September 2026",
+            confidence: "high",
+          },
+        },
       ],
     });
+    expect(output.programme.name).toBe("Scholarship");
     expect(output.programme.deadline).toBe("2026-09-30T15:59:00.000Z");
     expect(output.requirements.map((requirement) => requirement.key)).toEqual([
       "req_001",
       "req_002",
+    ]);
+    expect(output.requirements.map((requirement) => requirement.label)).toEqual([
+      "Citizenship",
+      "Certified transcript",
     ]);
   });
 

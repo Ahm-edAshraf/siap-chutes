@@ -166,6 +166,134 @@ describe("Convex authorization", () => {
     expect(modelRuns).toHaveLength(4);
   });
 
+  test("isolates retries, deduplicates model attempts, and stores normalized stage candidates", async () => {
+    const { t, user, applicationId } = await createApplication();
+    const service = t.withIdentity({
+      subject: "alice",
+      tokenIdentifier: "issuer|alice-service",
+      username: "alice",
+      role: "analysis_service",
+    });
+    const compiler = await service.mutation(api.analysis.beginStage, {
+      applicationId,
+      stage: "requirement_compiler",
+    });
+    expect(compiler).toMatchObject({ status: "started", attempt: 1 });
+    await expect(
+      service.mutation(api.analysis.beginStage, {
+        applicationId,
+        stage: "requirement_compiler",
+      }),
+    ).resolves.toMatchObject({ status: "already_running", attempt: 1 });
+
+    const failedAttempt = {
+      applicationId,
+      stage: "requirement_compiler" as const,
+      generation: compiler.generation,
+      attempt: compiler.attempt,
+      modelAttempt: 0,
+      model: "slow-tee",
+      confidentialCompute: true,
+      durationMs: 54_000,
+      errorCode: "CHUTES_STAGE_TIMEOUT",
+      promptVersion: "test",
+    };
+    await service.mutation(
+      api.analysis.recordModelAttemptFailure,
+      failedAttempt,
+    );
+    await service.mutation(
+      api.analysis.recordModelAttemptFailure,
+      failedAttempt,
+    );
+    await service.mutation(api.analysis.markStageRetryableFailure, {
+      applicationId,
+      stage: "requirement_compiler",
+      generation: compiler.generation,
+      attempt: compiler.attempt,
+      errorCode: "CHUTES_STAGE_TIMEOUT",
+    });
+    const afterFailure = await user.query(api.applications.getProgress, {
+      id: applicationId,
+    });
+    expect(afterFailure?.application.state).not.toBe("failed");
+    expect(
+      afterFailure?.stages.find(
+        (stage) => stage.stage === "requirement_compiler",
+      )?.status,
+    ).toBe("failed");
+    expect(afterFailure?.modelRuns).toHaveLength(1);
+
+    await expect(
+      service.mutation(api.analysis.beginStage, {
+        applicationId,
+        stage: "requirement_compiler",
+      }),
+    ).resolves.toMatchObject({ status: "started", attempt: 2 });
+
+    const mapper = await service.mutation(api.analysis.beginStage, {
+      applicationId,
+      stage: "eligibility_mapper",
+    });
+    await service.mutation(api.analysis.saveMapperCandidates, {
+      applicationId,
+      generation: mapper.generation,
+      attempt: mapper.attempt,
+      mappings: [
+        {
+          requirementKey: "req_001",
+          requirementLabel: "Citizenship",
+          proposedState: "confirmed",
+          citation: {
+            documentName: "identity.pdf",
+            pageNumber: 1,
+            excerpt: "Aina Demo is Malaysian",
+            confidence: "high",
+            verified: true,
+            matchKind: "document",
+          },
+          citationIsSupporting: true,
+          citationSubjectValidated: true,
+          claimValidated: true,
+          claim: {
+            field: "citizenship",
+            valueType: "string",
+            stringValue: "Malaysian",
+            subject: "Aina Demo",
+            qualifiers: [],
+            verbatimValue: "Malaysian",
+          },
+        },
+      ],
+    });
+    const readyArgs = {
+      applicationId,
+      stage: "eligibility_mapper" as const,
+      generation: mapper.generation,
+      attempt: mapper.attempt,
+      model: "mapper-tee",
+      confidentialCompute: true,
+      durationMs: 12_000,
+      promptVersion: "test",
+      modelAttempt: 0,
+      fallbackUsed: false,
+    };
+    await service.mutation(api.analysis.markAgentReady, readyArgs);
+    await service.mutation(api.analysis.markAgentReady, readyArgs);
+    const candidates = await service.query(api.analysis.getStageCandidates, {
+      applicationId,
+    });
+    expect(candidates.mapper).toHaveLength(1);
+    const finalProgress = await user.query(api.applications.getProgress, {
+      id: applicationId,
+    });
+    expect(
+      finalProgress?.modelRuns.filter(
+        (run) => run.stage === "eligibility_mapper",
+      ),
+    ).toHaveLength(1);
+  });
+
   test("rejects malformed profile and oversized persistent fields", async () => {
     const t = convexTest(schema, modules);
     const user = t.withIdentity({

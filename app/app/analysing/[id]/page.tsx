@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
@@ -23,6 +23,12 @@ const LABELS: Record<StageName, [string, string]> = {
   action_planner: ["Building the action plan", "Membina pelan tindakan"],
 };
 
+function isRequiredStage(stage: StageName) {
+  return (
+    stage === "requirement_compiler" || stage === "eligibility_mapper"
+  );
+}
+
 export default function AnalysingPage() {
   const params = useParams<{ id: string }>();
   const id = params.id as Id<"applications">;
@@ -32,8 +38,62 @@ export default function AnalysingPage() {
   const progress = useQuery(api.applications.getProgress, { id });
   const retry = useMutation(api.applications.retry);
   const remove = useMutation(api.applications.remove);
-  const requested = useRef(false);
+  const initialLaunch = useRef(false);
+  const finalizing = useRef(false);
+  const analysisDeadline = useRef<number | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
+  const [stageErrors, setStageErrors] = useState<
+    Partial<Record<StageName, string>>
+  >({});
+  const [requestingStages, setRequestingStages] = useState<
+    Partial<Record<StageName, boolean>>
+  >({});
+
+  const runStage = useCallback(
+    async (stage: StageName) => {
+      if (!documents) return false;
+      setRequestingStages((current) => ({ ...current, [stage]: true }));
+      setStageErrors((current) => {
+        const next = { ...current };
+        delete next[stage];
+        return next;
+      });
+      try {
+        if (
+          analysisDeadline.current === null ||
+          analysisDeadline.current <= Date.now()
+        ) {
+          analysisDeadline.current = Date.now() + 90_000;
+        }
+        const remainingMs = Math.max(
+          1_000,
+          analysisDeadline.current - Date.now(),
+        );
+        const response = await fetch(`/api/analyses/${id}/stages/${stage}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            documents,
+            deadlineAt: analysisDeadline.current,
+          }),
+          signal: AbortSignal.timeout(remainingMs),
+        });
+        if (!response.ok) {
+          const body = (await response.json()) as { error?: string };
+          throw new Error(body.error ?? "ANALYSIS_STAGE_FAILED");
+        }
+        return true;
+      } catch (error) {
+        const code =
+          error instanceof Error ? error.message : "ANALYSIS_STAGE_FAILED";
+        setStageErrors((current) => ({ ...current, [stage]: code }));
+        return false;
+      } finally {
+        setRequestingStages((current) => ({ ...current, [stage]: false }));
+      }
+    },
+    [documents, id],
+  );
 
   const stages = useMemo<Stage[]>(
     () =>
@@ -42,15 +102,21 @@ export default function AnalysingPage() {
         const modelRun = progress?.modelRuns.find(
           (run) => run.stage === name && run.outcome === "success",
         );
+        const failed =
+          stageErrors[name] !== undefined || stored?.status === "failed";
         return {
           id: name,
           label: t(...LABELS[name]),
           status:
             stored?.status === "complete"
               ? "complete"
+              : failed && !isRequiredStage(name)
+                ? "ready"
+                : failed
+                  ? "failed"
               : stored?.readyAt !== undefined
                 ? "ready"
-                : stored?.status === "running"
+                : stored?.status === "running" || requestingStages[name]
                   ? "running"
                   : "queued",
           subEvents: [
@@ -59,17 +125,31 @@ export default function AnalysingPage() {
               .map((event) =>
                 event.type === "completed"
                   ? t(
-                      "Structured result verified and saved",
-                      "Hasil berstruktur disahkan dan disimpan",
+                      event.messageKey.endsWith("deterministic_fallback")
+                        ? "Bounded deterministic fallback completed"
+                        : "Structured result verified and saved",
+                      event.messageKey.endsWith("deterministic_fallback")
+                        ? "Sandaran deterministik terhad selesai"
+                        : "Hasil berstruktur disahkan dan disimpan",
                     )
                   : event.type === "started"
                     ? t(
-                        "Confidential-compute stage started",
-                        "Peringkat pengkomputeran sulit bermula",
+                      "Confidential-compute stage started",
+                      "Peringkat pengkomputeran sulit bermula",
+                    )
+                    : event.type === "retrying"
+                      ? t(
+                        "Retrying only this stage",
+                        "Mencuba semula peringkat ini sahaja",
                       )
+                    : !isRequiredStage(name)
+                      ? t(
+                          "Live agent ended safely; bounded deterministic fallback queued",
+                          "Ejen langsung tamat dengan selamat; sandaran deterministik terhad dibariskan",
+                        )
                     : t(
-                        "Stage failed safely",
-                        "Peringkat gagal dengan selamat",
+                        "Stage attempt failed safely; retry is isolated",
+                        "Percubaan peringkat gagal dengan selamat; cuba semula diasingkan",
                       ),
               ) ?? []),
             ...(modelRun
@@ -80,10 +160,23 @@ export default function AnalysingPage() {
                   ),
                 ]
               : []),
+            ...(stageErrors[name]
+              ? [
+                  isRequiredStage(name)
+                    ? t(
+                        `Error code: ${stageErrors[name]}`,
+                        `Kod ralat: ${stageErrors[name]}`,
+                      )
+                    : t(
+                        "Deterministic fallback will preserve a complete report",
+                        "Sandaran deterministik akan mengekalkan laporan lengkap",
+                      ),
+                ]
+              : []),
           ],
         };
       }),
-    [progress, t],
+    [progress, requestingStages, stageErrors, t],
   );
 
   useEffect(() => {
@@ -92,31 +185,105 @@ export default function AnalysingPage() {
       router.replace(`/app/reports/${id}`);
       return;
     }
-    if (!documents || !progress || progress.application.state === "failed")
-      return;
     if (
-      requested.current ||
-      !progress.stages.some((stage) => stage.status === "pending")
-    )
+      !documents ||
+      !progress ||
+      progress.application.state === "failed" ||
+      initialLaunch.current
+    ) {
       return;
-    requested.current = true;
-    void fetch(`/api/analyses/${id}/ensemble`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ documents }),
-    })
+    }
+    const pending = stageNames.filter((name) => {
+      const stage = progress.stages.find((candidate) => candidate.stage === name);
+      return stage?.status === "pending";
+    });
+    if (pending.length === 0) return;
+    initialLaunch.current = true;
+    analysisDeadline.current = Date.now() + 90_000;
+    void fetch("/api/auth/chutes/session", { cache: "no-store" })
       .then(async (response) => {
-        if (!response.ok) {
-          const body = (await response.json()) as { error?: string };
-          throw new Error(body.error ?? "Analysis stage failed");
-        }
+        if (!response.ok) throw new Error("CHUTES_AUTH_REQUIRED");
+        const body = (await response.json()) as { isSignedIn?: boolean };
+        if (!body.isSignedIn) throw new Error("CHUTES_AUTH_REQUIRED");
+        const required = pending.filter(
+          (stage) =>
+            stage === "requirement_compiler" ||
+            stage === "eligibility_mapper",
+        );
+        const optional = pending.filter(
+          (stage) =>
+            stage === "red_team_reviewer" || stage === "action_planner",
+        );
+        const requiredRuns = required.map((stage) => runStage(stage));
+        await Promise.race([
+          Promise.all(requiredRuns),
+          new Promise((resolve) => setTimeout(resolve, 20_000)),
+        ]);
+        const optionalRuns = optional.map((stage) => runStage(stage));
+        await Promise.all([...requiredRuns, ...optionalRuns]);
       })
       .catch((error: unknown) => {
         setRequestError(
-          error instanceof Error ? error.message : "Analysis stage failed",
+          error instanceof Error ? error.message : "CHUTES_AUTH_REQUIRED",
         );
       });
-  }, [clearDocuments, documents, id, progress, router]);
+  }, [clearDocuments, documents, id, progress, router, runStage]);
+
+  useEffect(() => {
+    if (
+      !documents ||
+      !progress ||
+      progress.application.state === "complete" ||
+      progress.application.state === "failed" ||
+      requestError !== null ||
+      finalizing.current
+    ) {
+      return;
+    }
+    const byName = new Map(
+      progress.stages.map((stage) => [stage.stage, stage]),
+    );
+    const requiredReady = (
+      ["requirement_compiler", "eligibility_mapper"] as const
+    ).every((name) => {
+      const stage = byName.get(name);
+      return stage?.status === "complete" || stage?.readyAt !== undefined;
+    });
+    const allSettled = progress.stages.every(
+      (stage) =>
+        stage.status === "complete" ||
+        stage.status === "failed" ||
+        stage.readyAt !== undefined,
+    );
+    if (!requiredReady || !allSettled) return;
+    finalizing.current = true;
+    void fetch(`/api/analyses/${id}/ensemble`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        documentNames: documents.map((document) => document.name),
+      }),
+      signal: AbortSignal.timeout(10_000),
+    })
+      .then(async (response) => {
+        if (response.status === 409) {
+          finalizing.current = false;
+          return;
+        }
+        if (!response.ok) {
+          const body = (await response.json()) as { error?: string };
+          throw new Error(body.error ?? "ANALYSIS_FINALIZATION_FAILED");
+        }
+      })
+      .catch((error: unknown) => {
+        finalizing.current = false;
+        setRequestError(
+          error instanceof Error
+            ? error.message
+            : "ANALYSIS_FINALIZATION_FAILED",
+        );
+      });
+  }, [documents, id, progress, requestError]);
 
   if (progress === undefined) {
     return (
@@ -165,9 +332,17 @@ export default function AnalysingPage() {
           title={t("Analysis failed safely", "Analisis gagal dengan selamat")}
           description={`${t("No raw content was stored. Error code:", "Tiada kandungan mentah disimpan. Kod ralat:")} ${progress.application.errorCode ?? requestError ?? "ANALYSIS_STAGE_FAILED"}`}
           onRetry={() => {
+            if (progress.application.state !== "failed") {
+              finalizing.current = false;
+              setRequestError(null);
+              return;
+            }
             void retry({ id })
               .then(() => {
-                requested.current = false;
+                initialLaunch.current = false;
+                finalizing.current = false;
+                analysisDeadline.current = null;
+                setStageErrors({});
                 setRequestError(null);
               })
               .catch(() => setRequestError("RETRY_REQUEST_FAILED"));
@@ -199,8 +374,8 @@ export default function AnalysingPage() {
         <div className="flex items-center gap-2 text-xs font-medium text-siap-teal mt-3 bg-siap-teal/10 px-3 py-1 rounded-full">
           <Shield className="w-3.5 h-3.5" />
           {t(
-            "Four independent Chutes TEE agents running in parallel",
-            "Empat ejen TEE Chutes bebas berjalan secara selari",
+            "Four independent bounded Chutes TEE agents",
+            "Empat ejen TEE Chutes bebas dan terhad",
           )}
         </div>
       </div>
@@ -210,6 +385,12 @@ export default function AnalysingPage() {
             key={stage.id}
             stage={stage}
             isActive={index === activeIndex}
+            onRetry={
+              stage.status === "failed" &&
+              isRequiredStage(stage.id as StageName)
+                ? () => void runStage(stage.id as StageName)
+                : undefined
+            }
           />
         ))}
       </div>

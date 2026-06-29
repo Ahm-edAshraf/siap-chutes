@@ -62,6 +62,7 @@ export const stageDoc = v.object({
   errorCode: v.optional(v.string()),
   startedAt: v.optional(v.number()),
   readyAt: v.optional(v.number()),
+  appliedAt: v.optional(v.number()),
   completedAt: v.optional(v.number()),
   updatedAt: v.number(),
 });
@@ -95,6 +96,11 @@ export const modelRunDoc = v.object({
   outputTokens: v.optional(v.number()),
   promptVersion: v.string(),
   outcome: v.union(v.literal("success"), v.literal("failed")),
+  generation: v.optional(v.number()),
+  attempt: v.optional(v.number()),
+  modelAttempt: v.optional(v.number()),
+  errorCode: v.optional(v.string()),
+  fallbackUsed: v.optional(v.boolean()),
   createdAt: v.number(),
 });
 

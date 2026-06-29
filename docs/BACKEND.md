@@ -35,6 +35,7 @@ The normalized Convex schema contains:
 
 - `users`, `profiles`, `applications`
 - `analysisStages`, `analysisEvents`, `modelRuns`
+- `mapperCandidates`, `reviewerCandidates`, `plannerCandidates`
 - `requirements`, `requirementEvidence`, `missingDocuments`
 - `actionItems`, `actionDependencies`, `inventoryDocuments`
 
@@ -65,24 +66,43 @@ Outcomes:
 - `POST /api/auth/chutes/logout`
 - `GET /api/auth/convex-token`
 - `POST /api/analyses/[id]/ensemble`
+- `POST /api/analyses/[id]/stages/[stage]`
 
-The ensemble endpoint is authenticated, origin-checked, and idempotent. It
-starts four distinct TEE model requests concurrently, exposes each validated
-model response through Convex progress, then deterministically reconciles and
-persists the outputs in dependency order. It retries transient Chutes failures
-twice, refreshes once after a 401, permits one schema-repair request, and gives
-the ensemble a bounded 270-second budget. Timeouts are persisted as
-`CHUTES_STAGE_TIMEOUT`. Generation and attempt fencing prevents a late request
-from writing into a restarted analysis.
+The browser starts four authenticated, origin-checked stage requests
+while retaining extracted documents in memory. Compiler and mapper start first;
+reviewer and planner join after a 20-second head start. Every route shares the
+browser's 90-second deadline and has an 88-second server ceiling. Generation
+uses non-thinking mode and role-specific output caps. A slow required stage
+starts at most one distinct measured fallback after 35 seconds for the mapper
+or 45 seconds for the compiler; the first valid result wins and the loser is
+cancelled. Malformed structured output receives one bounded repair attempt.
+The final request to `ensemble` contains document names only and
+deterministically reconciles the persisted normalized candidates.
+
+Compiler and mapper are required stages. Reviewer timeout leaves semantic facts
+at their deterministically reconciled mapper state; planner timeout uses the
+deterministic plan builder. Reviewer conclusions remain an advisory audit and
+cannot make the canonical report depend on optional-stage availability.
+Successful stages are never discarded because an optional stage failed.
+Generation, stage-attempt, model-attempt, and applied-output fencing makes
+requests idempotent and prevents late writes into a restarted or finalized
+analysis. Failed required stages can be retried independently.
+
+Content-free model-run metadata records success, failure code, fallback use,
+duration, and token counts. Model fallbacks are ranked from recent failure rate
+and p95 duration. The browser exposes each stage as queued, running, ready,
+complete, or independently retryable. The complete analysis flow is bounded to
+100 seconds, including deterministic finalization.
 
 Default TEE models:
 
-- Primary: `google/gemma-4-31B-turbo-TEE`
-- Independent reviewer: `deepseek-ai/DeepSeek-V3.2-TEE`
-- Eligibility mapper: `MiniMaxAI/MiniMax-M2.5-TEE`
-- Action planner: `zai-org/GLM-5-TEE`
-- Ordered fallbacks use the same four-model allowlist while preserving a
-  distinct model for every agent.
+- Requirement compiler: `zai-org/GLM-5.1-TEE`
+- Eligibility mapper: `moonshotai/Kimi-K2.6-TEE`
+- Independent reviewer: `google/gemma-4-31B-turbo-TEE`
+- Action planner: `Qwen/Qwen3-32B-TEE`
+- Each role has its own measured fallback order. Recent reliability and p95
+  latency rank fallbacks, while the configured role model remains the stable
+  primary so one congested test window cannot silently reshuffle every role.
 
 The live model catalogue is authoritative. A configured model is used only
 when its current `confidential_compute` value is `true` and it advertises

@@ -24,6 +24,24 @@ export async function deleteApplicationChildren(
     .withIndex("by_application", (q) => q.eq("applicationId", applicationId))
     .collect();
   for (const row of modelRuns) await ctx.db.delete("modelRuns", row._id);
+  const mapperCandidates = await ctx.db
+    .query("mapperCandidates")
+    .withIndex("by_application", (q) => q.eq("applicationId", applicationId))
+    .collect();
+  for (const row of mapperCandidates)
+    await ctx.db.delete("mapperCandidates", row._id);
+  const reviewerCandidates = await ctx.db
+    .query("reviewerCandidates")
+    .withIndex("by_application", (q) => q.eq("applicationId", applicationId))
+    .collect();
+  for (const row of reviewerCandidates)
+    await ctx.db.delete("reviewerCandidates", row._id);
+  const plannerCandidates = await ctx.db
+    .query("plannerCandidates")
+    .withIndex("by_application", (q) => q.eq("applicationId", applicationId))
+    .collect();
+  for (const row of plannerCandidates)
+    await ctx.db.delete("plannerCandidates", row._id);
 
   const evidence = await ctx.db
     .query("requirementEvidence")

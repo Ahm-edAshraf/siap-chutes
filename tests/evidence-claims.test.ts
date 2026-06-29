@@ -1,7 +1,9 @@
 import { describe, expect, test } from "vitest";
 import {
   claimMatchesSubject,
+  evidencePageMatchesSubject,
   evaluateEvidenceClaim,
+  evaluateNumericCitation,
   isEvidenceClaimGrounded,
   isSupportingDocument,
   resolveEvidenceConsensus,
@@ -111,6 +113,64 @@ describe("typed evidence claims", () => {
     ).toBe(false);
   });
 
+  test("deterministically evaluates an unambiguous numeric citation for the applicant", () => {
+    expect(
+      evidencePageMatchesSubject(
+        "Aina Demo",
+        "Certified transcript for Aina Demo. Latest cumulative GPA 3.72 / 4.00.",
+      ),
+    ).toBe(true);
+    expect(
+      evaluateNumericCitation(
+        academicRequirement,
+        "Latest cumulative GPA 3.72 / 4.00",
+      ),
+    ).toBe(true);
+    expect(
+      resolveEvidenceConsensus({
+        requirement: academicRequirement,
+        mapping: { ...academicMapping, claim: undefined },
+        review: undefined,
+        profileResult: null,
+        citationVerified: true,
+        citationIsSupporting: true,
+        citationSubjectValidated: true,
+      }),
+    ).toEqual({
+      state: "confirmed",
+      deterministicResult: true,
+      usedSupportingEvidence: true,
+    });
+  });
+
+  test("does not guess when numbers in a citation imply conflicting outcomes", () => {
+    expect(
+      evaluateNumericCitation(
+        academicRequirement,
+        "Latest cumulative GPA 2.50 / 4.00",
+      ),
+    ).toBeNull();
+    expect(
+      resolveEvidenceConsensus({
+        requirement: academicRequirement,
+        mapping: {
+          ...academicMapping,
+          proposedState: "not_met",
+          claim: undefined,
+          citation: {
+            ...academicMapping.citation,
+            quote: "Latest cumulative GPA 2.50 / 4.00",
+          },
+        },
+        review: undefined,
+        profileResult: null,
+        citationVerified: true,
+        citationIsSupporting: true,
+        citationSubjectValidated: true,
+      }).state,
+    ).toBe("needs_verification");
+  });
+
   test("confirms grounded numeric evidence with deterministic comparison", () => {
     expect(
       resolveEvidenceConsensus({
@@ -163,7 +223,7 @@ describe("typed evidence claims", () => {
     ).toBe("needs_verification");
   });
 
-  test("keeps semantic facts deterministic through independent agreement", () => {
+  test("keeps grounded semantic facts stable when the optional review differs", () => {
     const mapping = {
       ...academicMapping,
       requirementKey: "req_006",
@@ -219,7 +279,7 @@ describe("typed evidence claims", () => {
         citationVerified: true,
         citationIsSupporting: true,
       }).state,
-    ).toBe("needs_verification");
+    ).toBe("confirmed");
   });
 
   test("evaluates normalized categorical evidence", () => {
